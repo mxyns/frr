@@ -1,0 +1,10 @@
+FROM frr-ubuntu20:latest AS makeBGP
+
+COPY 	--chown=frr ./bgpd/ /home/frr/frr/bgpd/
+
+RUN	cd /home/frr/frr && \
+	cd bgpd && \
+	make && \
+	cd .. && \
+	make && \
+	sudo make install
