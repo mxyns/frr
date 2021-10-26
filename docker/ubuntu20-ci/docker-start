@@ -3,6 +3,8 @@
 if [ $(uname -a | grep -ci Ubuntu) -ge 1 ]; then
     #for topotests under ubuntu host
     sudo modprobe mpls-router mpls-iptunnel
+    sudo /bin/bash /usr/sbin/configure
+    sudo ~/frr/tools/frrinit.sh start
     sudo /etc/init.d/openvswitch-switch start
 fi
 while true ; do sleep 365d ; done
