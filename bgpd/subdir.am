@@ -7,7 +7,8 @@ if BGPD
 # QUIC setup
 #
 QUIC_DIR = bgpd/quic
-QUIC_LIB_A = $(QUIC_DIR)/lib/libquiche.a
+# QUIC_LIB_A = $(QUIC_DIR)/lib/libquiche.a
+QUIC_LIB_A = 
 
 noinst_LIBRARIES += bgpd/libbgp.a
 sbin_PROGRAMS += bgpd/bgpd
