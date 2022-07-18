@@ -56,6 +56,8 @@ RUN cd && pwd && ls -al && \
     sudo make install
 
 COPY --chown=frr . /home/frr/frr/
+COPY docker/ubuntu20-ci/docker-start /usr/sbin/docker-start
+COPY docker/ubuntu20-ci/configure /usr/sbin/configure
 
 RUN cd && ls -al && ls -al frr
 
@@ -98,9 +100,6 @@ RUN cd ~/frr && \
 RUN cd ~/frr && make check || true
 
 # FROM frr AS conf
-COPY docker/ubuntu20-ci/docker-start /usr/sbin/docker-start
-COPY docker/ubuntu20-ci/configure /usr/sbin/configure
-
 RUN 	cd ~/frr && \
 	sudo install -m 775 -o frr -g frr -d /var/log/frr && \
 	sudo install -m 775 -o frr -g frrvty -d /etc/frr && \
@@ -113,7 +112,9 @@ RUN 	cd ~/frr && \
 # MPLS Setup
 RUN	cd ~/frr && \
 	sudo install -m 640 -o frr -g frr tools/etc/modules-load.d/modules.conf /etc/modules-load.d/modules.conf && \
-	sudo modprobe -S $(ls /lib/modules) mpls-router mpls-iptunnel && \
+    # operation not permitted (need secure boot disabled).
+    # not a problem bc module seems to be live by default
+    # sudo modprobe -S $(ls /lib/modules) mpls-router mpls-iptunnel && \
 	sudo install -m 640 -o frr -g frr tools/etc/sysctl.conf /etc/sysctl.conf
 
 RUN 	cd ~/frr && \
