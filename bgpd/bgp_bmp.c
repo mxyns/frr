@@ -240,6 +240,21 @@ static void bmp_free(struct bmp *bmp)
 	XFREE(MTYPE_BMP_CONN, bmp);
 }
 
+static uint64_t bmp_get_peer_distinguisher(struct bmp* bmp, afi_t afi) {
+
+	// legacy : TODO should be turned into an option at some point
+	// return bmp->targets->bgp->vrf_id;
+	struct bgp* bgp = bmp->targets->bgp;
+	struct prefix_rd* prd = &bgp->vpn_policy[afi].tovpn_rd;
+	/*
+	 * default vrf => can't have RD => 0
+	 * vrf => has RD?
+	 * 		if yes => use RD value
+	 * 		else => use vrf_id and convert it so that peer_distinguisher is 0::vrf_id
+	 */
+	return bgp->inst_type == VRF_DEFAULT ? 0 : prd ? *(uint64_t*)prd->val : (((uint64_t)htonl(bgp->vrf_id)) << 32);
+}
+
 static void bmp_common_hdr(struct stream *s, uint8_t ver, uint8_t type)
 {
 	stream_putc(s, ver);
@@ -248,7 +263,7 @@ static void bmp_common_hdr(struct stream *s, uint8_t ver, uint8_t type)
 }
 
 static void bmp_per_peer_hdr(struct stream *s, struct peer *peer,
-		uint8_t flags, uint8_t peer_type_flag, uint8_t *peer_distinguisher, const struct timeval *tv)
+		uint8_t flags, uint8_t peer_type_flag, uint64_t peer_distinguisher, const struct timeval *tv)
 {
 
 #define BMP_PEER_TYPE_GLOBAL_INSTANCE 0
@@ -271,9 +286,7 @@ static void bmp_per_peer_hdr(struct stream *s, struct peer *peer,
 	stream_putc(s, flags);
 
 	/* Peer Distinguisher */
-	uint8_t empty_peer_distinguisher[8] = {0};
-	uint64_t peerd = *(uint64_t*)(peer_distinguisher ? peer_distinguisher : empty_peer_distinguisher);
-	stream_putq(s, peerd);
+	stream_put(s, (uint8_t*)&peer_distinguisher, 8);
 
 	/* Peer Address */
 	if (peer->su.sa.sa_family == AF_INET6)
@@ -376,7 +389,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_UP_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &uptime_real);
+		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &uptime_real);
 
 		/* Local Address (16 bytes) */
 		if (peer->su_local->sa.sa_family == AF_INET6)
@@ -429,7 +442,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_DOWN_NOTIFICATION);
-		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &uptime_real);
+		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &uptime_real);
 
 		type_pos = stream_get_endp(s);
 		stream_putc(s, 0);	/* placeholder for down reason */
@@ -619,7 +632,7 @@ static void bmp_wrmirror_lost(struct bmp *bmp, struct pullwr *pullwr)
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 
 	bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_ROUTE_MIRRORING);
-	bmp_per_peer_hdr(s, bmp->targets->bgp->peer_self, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &tv);
+	bmp_per_peer_hdr(s, bmp->targets->bgp->peer_self, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &tv);
 
 	stream_putw(s, BMP_MIRROR_TLV_TYPE_INFO);
 	stream_putw(s, 2);
@@ -657,7 +670,7 @@ static bool bmp_wrmirror(struct bmp *bmp, struct pullwr *pullwr)
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 
 	bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_ROUTE_MIRRORING);
-	bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &bmq->tv);
+	bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &bmq->tv);
 
 	/* BMP Mirror TLV. */
 	stream_putw(s, BMP_MIRROR_TLV_TYPE_BGP_MESSAGE);
@@ -806,7 +819,7 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags, uint
 
 		bmp_common_hdr(s2, BMP_VERSION_3,
 				BMP_TYPE_ROUTE_MONITORING);
-		bmp_per_peer_hdr(s2, peer, flags, peer_type_flag, NULL, NULL);
+		bmp_per_peer_hdr(s2, peer, flags, peer_type_flag, 0, NULL);
 
 		stream_putl_at(s2, BMP_LENGTH_POS,
 				stream_get_endp(s) + stream_get_endp(s2));
@@ -912,7 +925,7 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 			uint8_t peer_type_flags,
-			uint8_t *peer_distinguisher_flag,
+			uint64_t peer_distinguisher_flag,
 			const struct prefix *p, struct prefix_rd *prd,
 			struct attr *attr, afi_t afi, safi_t safi,
 			time_t uptime)
@@ -1112,27 +1125,20 @@ afibreak:
 
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED)
 	    && CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB)) {
-		uint8_t peer_distinguisher[8] = {0};
-		if (bmp->targets->bgp->inst_type != VRF_DEFAULT) {
-			memcpy(peer_distinguisher,
-			       &bmp->targets->bgp->vrf_id,
-			       sizeof(vrf_id_t));
-		}
-
 		bmp_monitor(bmp, bpi->peer, 0,
-			    BMP_PEER_TYPE_LOC_RIB_INSTANCE, peer_distinguisher, bn_p,
+			    BMP_PEER_TYPE_LOC_RIB_INSTANCE, bmp_get_peer_distinguisher(bmp, afi), bn_p,
 			    prd, bpi->attr, afi, safi, bpi->uptime);
 	}
 
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID)
 	    && CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_POSTPOLICY))
 		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
-			    BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, bn_p,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, bn_p,
 			    prd, bpi->attr, afi, safi, bpi->uptime);
 
 	if (adjin)
 		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    NULL, bn_p, prd, adjin->attr, afi, safi,
+			    0, bn_p, prd, adjin->attr, afi, safi,
 			    adjin->uptime);
 
 	if (bn)
@@ -1260,12 +1266,7 @@ static bool bmp_wrqueue_locrib(struct bmp* bmp, struct pullwr* pullwr) {
 			break;
 	}
 
-	uint8_t peer_distinguisher[8] = {0};
-	if (bmp->targets->bgp->inst_type != VRF_DEFAULT) {
-		memcpy(peer_distinguisher, &bmp->targets->bgp->vrf_id, sizeof(vrf_id_t));
-	}
-
-	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE, peer_distinguisher,
+	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE, bmp_get_peer_distinguisher(bmp, afi),
 		    &bqe->p, prd, bpi ? bpi->attr : NULL,
 		    afi, safi, bpi ? bpi->uptime : monotime(NULL));
 	written = true;
@@ -1336,7 +1337,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 		}
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
-			    BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &bqe->p, prd,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi, safi,
 			    bpi ? bpi->uptime : monotime(NULL));
 		written = true;
@@ -1350,7 +1351,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 			if (adjin->peer == peer)
 				break;
 		}
-		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL,
+		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0,
 			    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
 			    adjin ? adjin->uptime : monotime(NULL));
 		written = true;
@@ -1506,7 +1507,7 @@ static void bmp_stats(struct thread *thread)
 
 		s = stream_new(BGP_MAX_PACKET_SIZE);
 		bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_STATISTICS_REPORT);
-		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, NULL, &tv);
+		bmp_per_peer_hdr(s, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &tv);
 
 		count_pos = stream_get_endp(s);
 		stream_putl(s, 0);
