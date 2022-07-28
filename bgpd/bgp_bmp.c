@@ -255,8 +255,8 @@ static void bmp_free(struct bmp *bmp)
 
 static uint64_t bmp_get_peer_distinguisher(struct bmp* bmp, afi_t afi) {
 
-	// legacy : TODO should be turned into an option at some point
-	// return bmp->targets->bgp->vrf_id;
+
+	// TODO vrf_id/rd could be turned into an option at some point
 	struct bgp* bgp = bmp->targets->bgp;
 	struct prefix_rd* prd = &bgp->vpn_policy[afi].tovpn_rd;
 	/*
@@ -853,7 +853,9 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags, uint
 
 		bmp_common_hdr(s2, BMP_VERSION_3,
 				BMP_TYPE_ROUTE_MONITORING);
-		bmp_per_peer_hdr(s2, bmp->targets->bgp, peer, flags, peer_type_flag, 0, NULL);
+
+		uint64_t peerd = peer_type_flag == BMP_PEER_TYPE_LOC_RIB_INSTANCE ? bmp_get_peer_distinguisher(bmp, afi) : 0;
+		bmp_per_peer_hdr(s2, bmp->targets->bgp, peer, flags, peer_type_flag, peerd, NULL);
 
 		stream_putl_at(s2, BMP_LENGTH_POS,
 				stream_get_endp(s) + stream_get_endp(s2));
