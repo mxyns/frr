@@ -284,6 +284,7 @@ struct bgp_path_info {
 
 	/* Uptime.  */
 	time_t uptime;
+	time_t rib_uptime;
 
 	/* reference count */
 	int lock;
