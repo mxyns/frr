@@ -3138,7 +3138,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		}
 	}
 
-	// TODO BMP insert rib update hook
 	if (old_select)
 		bgp_path_info_unset_flag(dest, old_select, BGP_PATH_SELECTED);
 	if (new_select) {
@@ -3151,8 +3150,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(new_select->flags, BGP_PATH_LINK_BW_CHG);
 	}
 
+	/* call bmp hook for loc-rib route update / withdraw after flags were set */
 	if (old_select || new_select) {
-		zlog_info("old_select==NULL %s | new_select==NULL %s", old_select==NULL ? "YES": "NO", new_select==NULL ? "YES" : "NO");
 
 		if (old_select) /* route is not installed in locrib anymore */
 			old_select->rib_uptime = (time_t)(-1L);
