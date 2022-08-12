@@ -237,7 +237,7 @@ struct bmp_targets {
 #define BMP_MON_POSTPOLICY	(1 << 1)
 
 // TODO define BMP_MON_LOC_RIB flag
-#define BMP_MON_LOC_RIB		(1 << 2)
+#define BMP_MON_LOC_RIB (1 << 2)
 	uint8_t afimon[AFI_MAX][SAFI_MAX];
 	bool mirror;
 

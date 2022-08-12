@@ -104,10 +104,9 @@ DEFINE_HOOK(bgp_rpki_prefix_status,
 	    (peer, attr, prefix));
 
 DEFINE_HOOK(bgp_route_update,
-	     (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	      struct bgp_path_info* updated_route, bool withdraw),
-	     (bgp, afi, safi, bn, updated_route, withdraw)
-);
+	    (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
+	     struct bgp_path_info *updated_route, bool withdraw),
+	    (bgp, afi, safi, bn, updated_route, withdraw));
 
 /* Extern from bgp_dump.c */
 extern const char *bgp_origin_str[];
@@ -3291,7 +3290,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(new_select->flags, BGP_PATH_LINK_BW_CHG);
 	}
 
-	/* call bmp hook for loc-rib route update / withdraw after flags were set */
+	/* call bmp hook for loc-rib route update / withdraw after flags were
+	 * set */
 	if (old_select || new_select) {
 
 		if (old_select) /* route is not installed in locrib anymore */
@@ -3300,7 +3300,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 			new_select->rib_uptime = bgp_clock();
 
 		bool is_withdraw = old_select && !new_select;
-		hook_call(bgp_route_update, bgp, afi, safi, dest, is_withdraw ? old_select : new_select, is_withdraw);
+		hook_call(bgp_route_update, bgp, afi, safi, dest,
+			  is_withdraw ? old_select : new_select, is_withdraw);
 	}
 
 

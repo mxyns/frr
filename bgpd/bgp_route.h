@@ -654,9 +654,8 @@ DECLARE_HOOK(bgp_process,
 /* called when a route is updated in the rib */
 DECLARE_HOOK(bgp_route_update,
 	     (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	      struct bgp_path_info* updated_route, bool withdraw),
-	     (bgp, afi, safi, bn, updated_route, withdraw)
-	     );
+	      struct bgp_path_info *updated_route, bool withdraw),
+	     (bgp, afi, safi, bn, updated_route, withdraw));
 
 /* BGP show options */
 #define BGP_SHOW_OPT_JSON (1 << 0)
