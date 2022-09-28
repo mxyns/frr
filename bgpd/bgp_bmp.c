@@ -265,7 +265,7 @@ static inline uint64_t bmp_get_peer_distinguisher(struct bmp *bmp, afi_t afi,
 	 *			vrf_id == VRF_UNKNOWN ?
 	 *				if yes => 0
 	 *				else => convert it so that
-	 * 				peer_distinguisher is 0::vrf_id
+	 *				peer_distinguisher is 0::vrf_id
 	 */
 	if (bgp->inst_type == VRF_DEFAULT)
 		return 0;
@@ -355,8 +355,7 @@ static void bmp_per_peer_hdr(struct stream *s, struct bgp *bgp,
 	stream_put_in_addr(s, bgp_id);
 
 	/* Timestamp */
-	/* set to 0 for LOC-RIB INSTANCE as install uptime is not saved atm */
-	if (!is_locrib && tv) {
+	if (tv) {
 		stream_putl(s, tv->tv_sec);
 		stream_putl(s, tv->tv_usec);
 	} else {
@@ -1014,7 +1013,7 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
 	bmp_per_peer_hdr(hdr, bmp->targets->bgp, peer, flags, peer_type_flag,
 			 bmp_get_peer_distinguisher(bmp, afi, peer_type_flag),
-			 &uptime_real);
+			 uptime == (time_t)(-1L) ? NULL : &uptime_real);
 
 	stream_putl_at(hdr, BMP_LENGTH_POS,
 			stream_get_endp(hdr) + stream_get_endp(msg));
@@ -1201,7 +1200,9 @@ afibreak:
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
 	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB)) {
 		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
-			    bn_p, prd, bpi->attr, afi, safi, bpi->rib_uptime);
+			    bn_p, prd, bpi->attr, afi, safi,
+			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
+					      : (time_t)(-1L));
 	}
 
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
@@ -1326,7 +1327,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 
 	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE, &bqe->p, prd,
 		    bpi ? bpi->attr : NULL, afi, safi,
-		    bpi ? bpi->rib_uptime : monotime(NULL));
+		    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
+				      : (time_t)(-1L));
 	written = true;
 
 out:
@@ -2793,13 +2795,38 @@ static int bgp_bmp_init(struct thread_master *tm)
 
 static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			    struct bgp_dest *bn,
-			    struct bgp_path_info *updated_route, bool withdraw)
+			    struct bgp_path_info *old_route,
+			    struct bgp_path_info *new_route)
 {
-
+	bool is_locribmon_enabled = false;
+	bool is_withdraw = old_route && !new_route;
+	struct bgp_path_info *updated_route =
+		is_withdraw ? old_route : new_route;
 	struct bmp_bgp *bmpbgp = bmp_bgp_get(bgp);
 	struct peer *peer = updated_route->peer;
 	struct bmp_targets *bt;
 	struct bmp *bmp;
+
+	frr_each (bmp_targets, &bmpbgp->targets, bt) {
+		if ((is_locribmon_enabled |=
+		     (bt->afimon[afi][safi] & BMP_MON_LOC_RIB)))
+			break;
+	}
+
+	if (!is_locribmon_enabled)
+		return 0;
+
+	/* route is not installed in locrib anymore and rib uptime was saved */
+	if (old_route && old_route->extra)
+		bgp_path_info_extra_get(old_route)->bgp_rib_uptime =
+			(time_t)(-1L);
+
+	/* route is installed in locrib from now on so
+	 * save rib uptime in bgp_path_info_extra
+	 */
+	if (new_route)
+		bgp_path_info_extra_get(new_route)->bgp_rib_uptime =
+			monotime(NULL);
 
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
 		if (bt->afimon[afi][safi] & BMP_MON_LOC_RIB) {
@@ -2821,6 +2848,7 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			};
 		}
 	};
+
 
 	return 0;
 }
