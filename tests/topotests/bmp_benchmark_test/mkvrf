@@ -1,0 +1,12 @@
+NAME=$1
+ID=$2
+ITF=$3
+
+if (( $# == 0)); then
+	echo "mkvrf <VRFNAME> <VRFID> <IF-BIND>"
+else
+    echo "binding if=$ITF on new vrf $NAME($ID)"
+	ip link add dev $NAME type vrf table $ID
+	ip link set dev $ITF master $NAME
+	ip link set dev $NAME up
+fi
