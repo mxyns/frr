@@ -47,10 +47,16 @@ def build_topo(tgen):
     uut = tgen.add_router("uut")
 
     p1 = tgen.add_router("p1")
-    tgen.add_link(uut, p1)
+    tgen.add_link(uut, p1, "uut-eth0", "p1-eth0")
 
-    vpn_ce1 = tgen.add_router("ce1")
-    tgen.add_link(uut, vpn_ce1, "uut-eth1", "ce1-eth1")
+    p2 = tgen.add_router("p2")
+    tgen.add_link(uut, p2, "uut-eth1", "p2-eth0")
+
+    ce1 = tgen.add_router("ce1")
+    tgen.add_link(uut, ce1, "uut-eth2", "ce1-eth0")
+
+    ce2 = tgen.add_router("ce2")
+    tgen.add_link(uut, ce2, "uut-eth3", "ce2-eth0")
 
 
 # New form of setup/teardown using pytest fixture
@@ -102,10 +108,10 @@ def skip_on_failure(tgen):
 
 
 def test_get_version(tgen):
-    "Test the logs the FRR version"
+    """Test the logs the FRR version"""
 
-    r1 = tgen.gears["uut"]
-    version = r1.vtysh_cmd("show version")
+    uut = tgen.gears["uut"]
+    version = uut.vtysh_cmd("show version")
     logger.info("FRR version is: " + version)
 
 
@@ -119,6 +125,17 @@ def test_connectivity(tgen):
     """Test the logs the FRR version"""
 
     uut = tgen.gears["uut"]
+    p1 = tgen.gears["p1"]
+    p2 = tgen.gears["p2"]
+    ce1 = tgen.gears["ce1"]
+    ce2 = tgen.gears["ce2"]
+
+    def _log_ce(ce):
+        o = ce.cmd_raises("ip link show")
+        logger.info("{} Links: \n{}".format(ce.name, o))
+        o = ce.cmd_raises("ip route show")
+        logger.info("{} Routes: \n{}".format(ce.name, o))
+
     output = uut.cmd_raises("ip vrf show")
     logger.info("UUT Links: \n" + output)
     output = uut.cmd_raises("ip route show")
@@ -126,29 +143,38 @@ def test_connectivity(tgen):
     output = uut.cmd_raises("ip link show")
     logger.info("UUT Links: \n" + output)
 
-    p1 = tgen.gears["p1"]
-    output = p1.cmd_raises("ip route show")
-    logger.info("p1 Routes: \n" + output)
-    output = uut.cmd_raises("ping -c1 10.0.0.2 -I uut-eth0")
-    output = p1.cmd_raises("ping -c1 10.0.0.1")
+    def _log_p(p):
+        o = p.cmd_raises("ip route show")
+        logger.info("{} Routes: \n{}".format(p.name, o))
 
-    vpn_ce1 = tgen.gears["ce1"]
-    output = vpn_ce1.cmd_raises("ip link show")
-    logger.info("CE1 Links: \n" + output)
-    output = vpn_ce1.cmd_raises("ip route show")
-    logger.info("CE1 Routes: \n" + output)
-    output = vpn_ce1.cmd_raises("ping -c1 20.0.0.1")
-    output = uut.cmd_raises("ping -c1 20.0.0.2 -I uut-eth1")
+    _log_p(p1)
+    output = p1.cmd_raises("ping -c1 10.1.0.1")
+    output = uut.cmd_raises("ping -c1 10.1.0.2 -I uut-eth0")
+
+    _log_p(p2)
+    output = p2.cmd_raises("ping -c1 10.2.0.1")
+    output = uut.cmd_raises("ping -c1 10.2.0.2 -I uut-eth1")
+
+    _log_ce(ce1)
+    output = ce1.cmd_raises("ping -c1 20.0.1.1")
+    output = uut.cmd_raises("ping -c1 20.0.1.2 -I uut-eth2")
+
+    _log_ce(ce2)
+    output = ce2.cmd_raises("ping -c1 20.0.2.1")
+    output = uut.cmd_raises("ping -c1 20.0.2.2 -I uut-eth3")
 
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
-    time.sleep(10)
+    time.sleep(3)
 
-    output = uut.vtysh_cmd("do show bgp sum")
-    output = uut.vtysh_cmd("do show bgp all")
-    output = vpn_ce1.vtysh_cmd("do show bgp sum")
-    output = vpn_ce1.vtysh_cmd("do show bgp all")
+    def _show_all(router):
+        o = router.vtysh_cmd("do show bgp sum")
+        o = router.vtysh_cmd("do show bgp all")
+
+    _show_all(ce1)
+    _show_all(ce2)
+    _show_all(uut)
 
 
 def test_query_ram_usage(tgen):
@@ -213,9 +239,9 @@ def test_prefix_spam(tgen):
     ref_file = "{}/prefixes.json".format(CWD)
 
     threads = []
-    for spammer in [("ce1", 200), ("p1", 100)]:
+    for spammer in [("ce1", 200), ("p1", 101), ("p2", 102)]:
         spammer = (tgen.gears[spammer[0]], spammer[1])
-        __send_prefixes_cmd(spammer, json.load(open(ref_file)).get("prefixes"), True)
+        with open(ref_file) as file: __send_prefixes_cmd(spammer, json.load(file).get("prefixes"), True)
         thread = _run_periodic_prefixes(spammer, ref_file, 2, 1000)
         threads.append(thread)
         thread.start()
