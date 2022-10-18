@@ -259,6 +259,19 @@ int bgp_nlri_parse_vpn(struct peer *peer, struct attr *attr,
 				     SAFI_MPLS_VPN, ZEBRA_ROUTE_BGP,
 				     BGP_ROUTE_NORMAL, &prd, &label, 1, NULL);
 		}
+
+		bgp_bench_log_push(peer->bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_withdraw = attr == NULL,
+					   .is_ingress = true,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = peer->remote_id,
+					   .prefix = p,
+					   .prefix_rd = prd
+				   });
+
 	}
 	/* Packet length consistency check. */
 	if (STREAM_READABLE(data) != 0) {

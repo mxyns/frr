@@ -819,6 +819,19 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 
 		num_pfx++;
 
+		struct prefix_rd dummy_prd = {0};
+		bgp_bench_log_push(peer->bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_withdraw = false,
+					   .is_ingress = false,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = peer->remote_id,
+					   .prefix = *dest_p,
+					   .prefix_rd = prd ? *prd : dummy_prd
+				   });
+
 		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
 
@@ -968,6 +981,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		} else
 			first_time = 0;
 
+		prd = NULL;
 		if (afi == AFI_IP && safi == SAFI_UNICAST
 		    && !peer_cap_enhe(peer, afi, safi))
 			stream_put_prefix_addpath(s, dest_p, addpath_capable,
@@ -1010,6 +1024,19 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		}
 
 		num_pfx++;
+
+		struct prefix_rd dummy_prd = {0};
+		bgp_bench_log_push(peer->bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_withdraw = true,
+					   .is_ingress = false,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = peer->remote_id,
+					   .prefix = *dest_p,
+					   .prefix_rd = prd ? *prd : dummy_prd
+				   });
 
 		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];

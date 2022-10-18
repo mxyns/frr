@@ -15,6 +15,8 @@ from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
 from lib.bgp import verify_bgp_convergence_from_running_config
 
+from tests.topotests.lib.common_config import stop_router
+
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
@@ -59,6 +61,9 @@ def build_topo(tgen):
     ce2 = tgen.add_router("ce2")
     tgen.add_link(uut, ce2, "uut-eth3", "ce2-eth0")
 
+    provider_router_1 = tgen.add_router("prvdr1")
+    tgen.add_link(uut, provider_router_1, "uut-eth4", "prvdr1-eth0")
+
 
 # New form of setup/teardown using pytest fixture
 def setup_router_vrf(router):
@@ -91,6 +96,13 @@ def tgen(request):
 
     # Provide tgen as argument to each test function
     yield tgen
+
+    for rname, router in router_list.items():
+        router.stop()
+
+    time.sleep(5)
+
+    export_benchmark_logs(tgen, rnames=["uut"])
 
     # Teardown after last test runs
     tgen.stop_topology()
@@ -130,6 +142,7 @@ def test_connectivity(tgen):
     p2 = tgen.gears["p2"]
     ce1 = tgen.gears["ce1"]
     ce2 = tgen.gears["ce2"]
+    prvdr1 = tgen.gears["prvdr1"]
 
     def _log_ce(ce):
         o = ce.cmd_raises("ip link show")
@@ -164,6 +177,10 @@ def test_connectivity(tgen):
     output = ce2.cmd_raises("ping -c1 20.0.2.1")
     output = uut.cmd_raises("ping -c1 20.0.2.2 -I uut-eth3")
 
+    _log_ce(prvdr1)
+    output = prvdr1.cmd_raises("ping -c1 100.0.001.1")
+    output = uut.cmd_raises("ping -c1 100.0.001.2 -I uut-eth4")
+
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
@@ -178,6 +195,12 @@ def test_connectivity(tgen):
     _show_all(uut)
 
 
+def get_pids(router: list[str]):
+    pid_files = router.run("ls -1 /var/run/frr/*.pid")
+    pid_files = pid_files.split("\n")
+    return pid_files
+
+
 def test_query_ram_usage(tgen):
     """Test if we can query the memory usage of each frr daemon on the UUT"""
 
@@ -186,11 +209,10 @@ def test_query_ram_usage(tgen):
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
-    pidFiles = uut.run("ls -1 /var/run/frr/*.pid")
-    pidFiles = pidFiles.split("\n")
-    logger.info("pidFiles = " + str(pidFiles))
+    pid_files = get_pids(uut)
+    logger.info("pidFiles = " + str(pid_files))
     ram_usages = dict()
-    for pidFile in [pidFile for pidFile in pidFiles if pidFile != ""]:
+    for pidFile in [pidFile for pidFile in pid_files if pidFile != ""]:
         pid = int(uut.cmd_raises("cat %s" % pidFile, warn=False).strip())
         ram_usage = uut.run("pmap " + str(pid) + " | tail -n 1 | awk '/[0-9]K/{print $2}'")
 
@@ -212,8 +234,8 @@ def test_prefix_spam(tgen):
             """configure terminal
                router bgp ASN
                PREFIXES
-            """ .replace("ASN", str(asn))
-                .replace("PREFIXES", "\n".join([f"{'no ' if not yes else ''}network " + prefix for prefix in prefixes]))
+            """.replace("ASN", str(asn))
+            .replace("PREFIXES", "\n".join([f"{'no ' if not yes else ''}network " + prefix for prefix in prefixes]))
         )
 
     def _send_prefixes(gear, prefixes, n, interval):
@@ -254,12 +276,15 @@ def test_prefix_spam(tgen):
     [thread.join() for thread in threads]
 
 
-def test_export_benchmark_logs(tgen):
+def export_benchmark_logs(tgen, rnames=None, routers=None):
     def _export_file(router, file_from, file_to):
         content = router.cmd_raises(f"cat {file_from}")
+        print(content)
         dir_to = os.path.dirname(file_to)
         os.makedirs(dir_to, exist_ok=True)
+
         with open(file_to, "w") as f:
+            print("opened " + file_to)
             f.write(content)
 
     def _list_files(router, ls_dir):
@@ -269,13 +294,14 @@ def test_export_benchmark_logs(tgen):
     def _export_files(router, logdir, prefix):
         print(_list_files(router, logdir))
         logger.info("exporting benchmark logs")
+        to_dir = f"{CWD}/{router.name}/benchmark"
+        [os.remove(f) for f in glob.glob(os.path.join(to_dir, "*")) if not os.path.samefile(to_dir, CWD) and not os.path.isdir(f)]
         for file in [os.path.join(logdir, x) for x in _list_files(router, logdir) if prefix in x]:
-            path = f"{CWD}/{router.name}/benchmark/{os.path.basename(file)}"
+            path = os.path.join(to_dir, os.path.basename(file))
             logger.info(f"{file} -> {path}")
-            [os.remove(f) for f in glob.glob(os.path.join(os.path.dirname(path), "*"))]
             _export_file(router, file, path)
 
-    for router in [tgen.gears[x] for x in ["uut"]]:
+    for router in (routers or [tgen.gears[x] for x in rnames] if rnames is not None else []):
         _export_files(router, "/tmp", "benchmark_vrf_")
 
 

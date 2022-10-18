@@ -5961,6 +5961,8 @@ bool bgp_addpath_encode_rx(struct peer *peer, afi_t afi, safi_t safi)
 			      PEER_CAP_ADDPATH_AF_TX_RCV));
 }
 
+
+
 /* Parse NLRI stream.  Withdraw NLRI is recognized by NULL attr
    value. */
 int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr,
@@ -6091,6 +6093,19 @@ int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr,
 					   safi, ZEBRA_ROUTE_BGP,
 					   BGP_ROUTE_NORMAL, NULL, NULL, 0,
 					   NULL);
+
+        bgp_bench_log_push(peer->bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_withdraw = attr == NULL,
+					   .is_ingress = true,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = peer->remote_id,
+					   .prefix = p,
+					   .prefix_rd = { 0 }
+        });
+
 
 		/* Do not send BGP notification twice when maximum-prefix count
 		 * overflow. */

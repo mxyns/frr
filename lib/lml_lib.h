@@ -14,7 +14,7 @@
 #define LML_CLEAR_OPT 1
 #define LML_NO_OPT 0
 
-#define LML_DECLARE_TYPE(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT)   \
+#define LML_DECLARE_ALL(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT)   \
     TYPE;                                                                      \
     struct PREFIX##_stack;                                                     \
     struct PREFIX##_log;                                                       \
@@ -33,11 +33,9 @@
     LML_COND(CLEARABLE_OPT, void PREFIX##_log_clear(struct PREFIX##_log *log));
 
 
-#define LML_DEFINE_TYPE(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT,    \
-                        FIELDS...)                                             \
-                                                                               \
+#define LML_DEFINE_TYPES(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT,   \
+                         FIELDS...)                                            \
     TYPE FIELDS;                                                               \
-                                                                               \
     struct PREFIX##_stack {                                                    \
         size_t stack_cap;                                                      \
         size_t stack_size;                                                     \
@@ -52,7 +50,10 @@
         struct PREFIX##_stack *head;                                           \
         LML_COND(CLEARABLE_OPT, struct PREFIX##_stack *curr;)                  \
         struct PREFIX##_stack *tail;                                           \
-    };                                                                         \
+    };
+
+
+#define LML_DEFINE_FUNCS(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT)   \
                                                                                \
     struct PREFIX##_stack *PREFIX##_stack_new(size_t stack_cap LML_COND(       \
             MEMSIZE_OPT, , size_t *alloc_size_ref)) {                          \

@@ -375,7 +375,20 @@ struct bgp_srv6_function {
 
 #include "lml_lib.h"
 
-LML_DECLARE_TYPE(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT, LML_NO_OPT);
+time_t lml_time(void);
+LML_DECLARE_ALL(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT, LML_NO_OPT);
+LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT,
+		LML_NO_OPT,
+		{
+			time_t timestamp;
+			bool is_withdraw;
+			bool is_ingress;
+			afi_t afi;
+			safi_t safi;
+			struct in_addr peerid;
+			struct prefix prefix;
+			struct prefix_rd prefix_rd;
+		});
 
 /* BGP instance structure.  */
 struct bgp {
