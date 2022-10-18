@@ -101,6 +101,14 @@ DEFINE_QOBJ_TYPE(bgp);
 DEFINE_QOBJ_TYPE(peer);
 DEFINE_HOOK(bgp_inst_delete, (struct bgp *bgp), (bgp));
 
+LML_DEFINE_TYPE(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT,
+		LML_NO_OPT,
+		{
+			time_t timestamp;
+			bool out_in;
+			struct prefix prefix;
+		});
+
 /* BGP process wide configuration.  */
 static struct bgp_master bgp_master;
 
@@ -3135,6 +3143,8 @@ static struct bgp *bgp_create(as_t *as, const char *name,
 
 	bgp = XCALLOC(MTYPE_BGP, sizeof(struct bgp));
 
+	bgp->bgp_bench_log = bgp_bench_log_new(1 << 20);
+
 	if (BGP_DEBUG(zebra, ZEBRA)) {
 		if (inst_type == BGP_INSTANCE_TYPE_DEFAULT)
 			zlog_debug("Creating Default VRF, AS %u", *as);
@@ -3801,6 +3811,8 @@ void bgp_free(struct bgp *bgp)
 	struct bgp_rmap *rmap;
 
 	QOBJ_UNREG(bgp);
+
+	bgp_bench_log_free(bgp->bgp_bench_log);
 
 	list_delete(&bgp->group);
 	list_delete(&bgp->peer);
@@ -8074,6 +8086,15 @@ void bgp_init(unsigned short instance)
 	cmd_variable_handler_register(bgp_viewvrf_var_handlers);
 }
 
+static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack *stack, size_t index, struct bgp_bench *entry, void* extra) {
+
+	FILE *file = (FILE *) extra;
+	static char line[512];
+	memset(line, 0, 512);
+	snprintfrr(line, 512, "[%pTTM][%lu][%s] %pFX", &entry->timestamp, log->alloc_size, entry->out_in == true ? "IN" : "OUT", &entry->prefix);
+	fprintf(file, "%s\n", line);
+}
+
 void bgp_terminate(void)
 {
 	struct bgp *bgp;
@@ -8090,9 +8111,23 @@ void bgp_terminate(void)
 	 * a dangling connection
 	 */
 
+	zlog_info("STOPPING BGP LOL");
 	bgp_close();
 	/* reverse bgp_master_init */
 	for (ALL_LIST_ELEMENTS(bm->bgp, mnode, mnnode, bgp)) {
+		mode_t oldumask = umask(0777 & ~LOGFILE_MASK);
+		zlog_info("dumping for bgp vrf %d", bgp->vrf_id);
+		char path[128] = {0};
+		snprintf(path, 128, "/tmp/benchmark_vrf_%d", bgp->vrf_id);
+		FILE * logfile = fopen(path, "w+");
+		if (logfile == NULL) {
+			zlog_info("CANT OPEN FILE %s", path);
+		}
+		fprintf(logfile, "# BGP BENCHMARK VRF %d\n", bgp->vrf_id);
+		bgp_bench_log_dump(bgp->bgp_bench_log, bgp_dump_bench_log, (void*) logfile);
+		fclose(logfile);
+		umask(oldumask);
+
 		bgp_close_vrf_socket(bgp);
 		for (ALL_LIST_ELEMENTS(bgp->peer, node, nnode, peer)) {
 			if (BGP_PEER_GRACEFUL_RESTART_CAPABLE(peer)) {

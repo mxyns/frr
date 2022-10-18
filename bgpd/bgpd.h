@@ -373,6 +373,10 @@ struct bgp_srv6_function {
 	char locator_name[SRV6_LOCNAME_SIZE];
 };
 
+#include "lml_lib.h"
+
+LML_DECLARE_TYPE(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT, LML_NO_OPT);
+
 /* BGP instance structure.  */
 struct bgp {
 	/* AS number of this BGP instance.  */
@@ -830,6 +834,8 @@ struct bgp {
 	/* BGP optimal route reflection group and Root Router configuration */
 	uint32_t orr_group_count;
 	struct list *orr_group[AFI_MAX][SAFI_MAX];
+
+	struct bgp_bench_log *bgp_bench_log;
 
 	QOBJ_FIELDS;
 };

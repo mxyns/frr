@@ -14,15 +14,34 @@
 #define LML_CLEAR_OPT 1
 #define LML_NO_OPT 0
 
-#define LML_DECLARE_LOG(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT,    \
+#define LML_DECLARE_TYPE(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT)   \
+    TYPE;                                                                      \
+    struct PREFIX##_stack;                                                     \
+    struct PREFIX##_log;                                                       \
+    struct PREFIX##_stack *PREFIX##_stack_new(                                 \
+            size_t stack_cap LML_COND(MEMSIZE_OPT, , size_t *alloc_size_ref)); \
+    struct PREFIX##_log *PREFIX##_log_new(size_t stack_cap);                   \
+    struct PREFIX##_stack *PREFIX##_log_expand(struct PREFIX##_log *log);      \
+    TYPE *PREFIX##_log_push(struct PREFIX##_log *log, TYPE entry);             \
+    void PREFIX##_log_dump(struct PREFIX##_log *log,                           \
+                           void (*consumer)(struct PREFIX##_log * log,         \
+                                            struct PREFIX##_stack * stack,     \
+                                            size_t index, TYPE * entry,        \
+                                            void *extra),                      \
+                           void *extra);                                       \
+    void PREFIX##_log_free(struct PREFIX##_log *log);                          \
+    LML_COND(CLEARABLE_OPT, void PREFIX##_log_clear(struct PREFIX##_log *log));
+
+
+#define LML_DEFINE_TYPE(PREFIX, TYPE, PREV_OPT, MEMSIZE_OPT, CLEARABLE_OPT,    \
                         FIELDS...)                                             \
                                                                                \
-    TYPE##_entry FIELDS;                                                       \
+    TYPE FIELDS;                                                               \
                                                                                \
     struct PREFIX##_stack {                                                    \
         size_t stack_cap;                                                      \
         size_t stack_size;                                                     \
-        TYPE##_entry *entries;                                                 \
+        TYPE *entries;                                                         \
         struct PREFIX##_stack *next;                                           \
         LML_COND(PREV_OPT, struct PREFIX##_stack *prev;)                       \
     };                                                                         \
@@ -38,12 +57,12 @@
     struct PREFIX##_stack *PREFIX##_stack_new(size_t stack_cap LML_COND(       \
             MEMSIZE_OPT, , size_t *alloc_size_ref)) {                          \
                                                                                \
-        size_t alloc_size = sizeof(struct PREFIX##_stack) +                    \
-                            sizeof(TYPE##_entry) * stack_cap;                  \
+        size_t alloc_size =                                                    \
+                sizeof(struct PREFIX##_stack) + sizeof(TYPE) * stack_cap;      \
         struct PREFIX##_stack *stack = malloc(alloc_size);                     \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
-        stack->entries = (TYPE##_entry *) (stack + 1);                         \
+        stack->entries = (TYPE *) (stack + 1);                                 \
         stack->next = NULL;                                                    \
         LML_COND(PREV_OPT, stack->prev = NULL;)                                \
         LML_COND(MEMSIZE_OPT,                                                  \
@@ -56,12 +75,12 @@
                                                                                \
         size_t alloc_size = sizeof(struct PREFIX##_log) +                      \
                             sizeof(struct PREFIX##_stack) +                    \
-                            sizeof(TYPE##_entry) * stack_cap;                  \
+                            sizeof(TYPE) * stack_cap;                          \
         struct PREFIX##_log *log = malloc(alloc_size);                         \
         struct PREFIX##_stack *stack = (struct PREFIX##_stack *) (log + 1);    \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
-        stack->entries = (TYPE##_entry *) (stack + 1);                         \
+        stack->entries = (TYPE *) (stack + 1);                                 \
         stack->next = NULL;                                                    \
         LML_COND(PREV_OPT, stack->prev = NULL;)                                \
         LML_COND(MEMSIZE_OPT, log->alloc_size = alloc_size;)                   \
@@ -86,8 +105,7 @@
         return log->tail;                                                      \
     }                                                                          \
                                                                                \
-    TYPE##_entry *PREFIX##_log_push(struct PREFIX##_log *log,                  \
-                                    TYPE##_entry entry) {                      \
+    TYPE *PREFIX##_log_push(struct PREFIX##_log *log, TYPE entry) {            \
                                                                                \
         struct PREFIX##_stack *stack = log->tail;                              \
         LML_COND(CLEARABLE_OPT, stack = log->curr;)                            \
@@ -99,15 +117,15 @@
                                                                                \
         LML_COND(CLEARABLE_OPT, log->curr = stack;)                            \
         stack->entries[stack->stack_size++] = entry;                           \
-        return &stack->entries[stack->stack_size - 1];                           \
+        return &stack->entries[stack->stack_size - 1];                         \
     }                                                                          \
                                                                                \
-    void PREFIX##_log_dump(                                                    \
-            struct PREFIX##_log *log,                                          \
-            void (*consumer)(struct PREFIX##_log * log,                        \
-                             struct PREFIX##_stack * stack, size_t index,      \
-                             TYPE##_entry * entry, void *extra),               \
-            void *extra) {                                                     \
+    void PREFIX##_log_dump(struct PREFIX##_log *log,                           \
+                           void (*consumer)(struct PREFIX##_log * log,         \
+                                            struct PREFIX##_stack * stack,     \
+                                            size_t index, TYPE * entry,        \
+                                            void *extra),                      \
+                           void *extra) {                                      \
                                                                                \
         struct PREFIX##_stack *stack = log->head;                              \
         do {                                                                   \

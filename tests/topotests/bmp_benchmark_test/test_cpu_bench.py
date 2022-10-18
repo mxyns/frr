@@ -9,6 +9,7 @@ import pytest
 import threading
 import json
 import time
+import glob
 
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
@@ -251,6 +252,31 @@ def test_prefix_spam(tgen):
         time.sleep(0.5)
 
     [thread.join() for thread in threads]
+
+
+def test_export_benchmark_logs(tgen):
+    def _export_file(router, file_from, file_to):
+        content = router.cmd_raises(f"cat {file_from}")
+        dir_to = os.path.dirname(file_to)
+        os.makedirs(dir_to, exist_ok=True)
+        with open(file_to, "w") as f:
+            f.write(content)
+
+    def _list_files(router, ls_dir):
+        content = router.cmd(f"ls {ls_dir} -1 --color=never ")
+        return content.split("\n")
+
+    def _export_files(router, logdir, prefix):
+        print(_list_files(router, logdir))
+        logger.info("exporting benchmark logs")
+        for file in [os.path.join(logdir, x) for x in _list_files(router, logdir) if prefix in x]:
+            path = f"{CWD}/{router.name}/benchmark/{os.path.basename(file)}"
+            logger.info(f"{file} -> {path}")
+            [os.remove(f) for f in glob.glob(os.path.join(os.path.dirname(path), "*"))]
+            _export_file(router, file, path)
+
+    for router in [tgen.gears[x] for x in ["uut"]]:
+        _export_files(router, "/tmp", "benchmark_vrf_")
 
 
 if __name__ == "__main__":
