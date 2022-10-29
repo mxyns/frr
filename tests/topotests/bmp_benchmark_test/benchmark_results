@@ -1,9 +1,12 @@
 #!/bin/python3
 
+import glob
 import json
 import os
 import sys
-import glob
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
@@ -12,30 +15,115 @@ sys.path.append(os.path.join(CWD, "../"))
 def load_files_from_router(rname):
     fdir = os.path.join(CWD, rname, "benchmark")
     print("Loading files from router {} in directory {}".format(rname, fdir))
-    results = list()
-    for file in glob.glob(os.path.join(fdir, "benchmark_vrf_*")):
+    benchmark_logs = list()
+    for file in glob.glob(os.path.join(fdir, "benchmark_*_vrf_*")):
         with open(file) as file:
             res = json.load(file)
             # eliminate last empty event
             res["events"] = [x for x in res.get("events") if bool(x)]
-            results.append(res)
+            benchmark_logs.append(res)
 
-    return results
+    ram_usage = []
+    for file in glob.glob(os.path.join(fdir, "ram_usage")):
+        with open(file) as file:
+            ram_usage = json.load(file)
+
+    return benchmark_logs, ram_usage
 
 
+# take object {timestamp:number, events:[]}
+# "normalize" timestamp (set time reference to lowest event timestamp)
+# return 2 list of all ingress and outgress events separated
+def unzip_ingress_outgress(vrf_log_json):
+    def _normalize_timestamp(event, ref_timestamp):
+        event["timestamp"] = event["timestamp"] - ref_timestamp
+        return event
+
+    ref_timestamp = vrf_log_json.get("events")[0].get("timestamp")
+    return [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if
+            x.get("ingress") == 1], [_normalize_timestamp(x, ref_timestamp) for x in
+                                     vrf_log_json.get("events") if x.get("ingress") == 0]
+
+
+# take object {timestamp:number, events:[])}
+# separate ingress and outgress
+# find next outgress msg related to prefix of each ingress msg
+# return [ingress, next_outgress]
 def match_events(vrf_log_json):
+    def _find_prefix_after(events, prefix, timestamp):
+        return next(filter(lambda event: event.get("prefix") == prefix and event.get("timestamp") >= timestamp, events),
+                    None)
+
+    ingress, outgress = unzip_ingress_outgress(vrf_log_json)
+
+    return [(ingress_x, _find_prefix_after(outgress, ingress_x.get("prefix"), ingress_x.get("timestamp"))) for ingress_x
+            in ingress]
 
 
+# take {timestamp:number, events:[]}
+# get every mem_usage field in each event
+# return list of mem_usage values (memory usage of logging system)
+def benchmark_logs_get_ram_usage(vrf_log_json):
+    return list(map(lambda ev: ev.get("mem_usage"), vrf_log_json.get("events")))
 
+
+# take list [{},{},{}] with n fields in each list member
+# return dict with n lists containing all values of the same key, in order mapped to list member keys
+def json_obj_split_series(obj):
+    return dict(zip(obj[0].keys(), zip(*[r.values() for r in obj])))
 
 
 def main():
-    logs = load_files_from_router("uut")
+    # TODO add prefix ticks
 
-    for vrf_log in logs:
+    plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+    logs, ram_usage = load_files_from_router("uut")
+
+    print("plotting ram usage")
+    per_process_ram_usage = json_obj_split_series(ram_usage)
+    per_process_ram_usage = per_process_ram_usage | json_obj_split_series(per_process_ram_usage.get("usage"))
+    per_process_ram_usage.pop("usage")
+
+    ax = plt.gca()
+    labels = (np.array(per_process_ram_usage["timestamp"]) - np.min(per_process_ram_usage["timestamp"])) * 1e-6
+    for idx, (process, mem_use) in enumerate(
+            {k: per_process_ram_usage[k] for k in
+             set(per_process_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
+        ax.plot(labels, np.array(mem_use) * 1e-6, label=f"{process} daemon")
+    ax.set_ylabel("Memory Usage (MB)")
+    ax.legend()
+    plt.suptitle("FRR Daemons RAM Usage Monitoring")
+    plt.title("{} samples over {} seconds".format(len(labels), np.max(
+        per_process_ram_usage["timestamp"] - np.min(per_process_ram_usage["timestamp"])) * 1e-9))
+    plt.show()
+
+    print("plotting cpu usage")
+    fig, axs = plt.subplots(len(logs), 1, figsize=(6.4, 2. * 4.8))
+    for i, vrf_log in enumerate(logs):
         matches = match_events(vrf_log)
-        print(matches)
 
+        # for each in/out msg match -> (in.timestamp, time_between(in, out))
+        in_timestamp__duration = lambda: map(lambda t: (
+            t[0].get("timestamp") * 1e-9, (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9),
+                                             filter(lambda t: None not in t, matches))
+        # split timestamps and durations. keep on durations
+        durations = list(zip(*in_timestamp__duration()))[1]
+        ln1 = axs[i].plot(durations, color=plt_colors[0], label='cpu latency (ms)')
+        axs[i].tick_params(axis='y', labelcolor=plt_colors[0])
+
+        ax2 = axs[i].twinx()
+        ln2 = ax2.plot(benchmark_logs_get_ram_usage(vrf_log)[:len(durations)], color=plt_colors[1],
+                       label='logs ram usage (bytes)')
+        ax2.tick_params(axis='y', labelcolor=plt_colors[1])
+
+        lns = ln1 + ln2
+        fig.legend(lns, [ln.get_label() for ln in lns])
+
+        axs[i].set_title("FRR Daemons CPU Usage Monitoring\n{} samples over {} seconds".format(len(durations),
+                sum(list(in_timestamp__duration())[-1]) - matches[0][0].get("timestamp") * 1e-9))
+
+    plt.show()
 
 
 if __name__ == "__main__":

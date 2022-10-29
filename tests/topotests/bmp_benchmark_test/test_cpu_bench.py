@@ -3,25 +3,25 @@
 """
 <template>.py: Test <template>.
 """
-import os
-import sys
-import pytest
-import threading
-import json
-import time
 import glob
+import json
+import os
+import re
+import sys
+import threading
+import time
 
+import pytest
+from lib.bgp import verify_bgp_convergence_from_running_config
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
-from lib.bgp import verify_bgp_convergence_from_running_config
 
-from tests.topotests.lib.common_config import stop_router, run_frr_cmd
-from tests.topotests.lib.topotest import frr_unicode
+from tests.topotests.lib.common_config import run_frr_cmd
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
-prefix_file = "prefixes.json"
+prefix_file = "routeviews_prefixes.json"
 
 # TODO: select markers based on daemons used during test
 # pytest module level markers
@@ -46,6 +46,7 @@ pytestmark = [
 ]
 
 router_ids = dict()
+
 
 # Function we pass to Topogen to create the topology
 def build_topo(tgen):
@@ -86,6 +87,47 @@ def tgen(request):
     # This function initiates the topology build with Topogen...
     tgen = Topogen(build_topo, request.module.__name__)
 
+    topo_running = False
+
+    def _monitor_ram_usage(rnode):
+        logger.info("RAM MONITOR")
+
+        # wait for topology to start
+        while not topo_running:
+            time.sleep(0.1)
+
+        all_daemons_found = {}
+
+        ram_usages = list()
+        # wait for topology to stop
+        while topo_running:
+            usage = get_router_ram_usages(rnode)
+            logger.info("adding value" + str(usage))
+            ram_usages.append({"timestamp": time.time_ns(), "usage": usage})
+
+            # keep one good usage with most information possible
+            if usage != {}:
+                # add keys but with 0 value
+                all_daemons_found = all_daemons_found | {k: 0 for k in usage.keys()}
+
+            time.sleep(0.1)
+
+        # dump mem usage results
+        filepath = "{}/{}/benchmark/ram_usage".format(CWD, rnode.name)
+        [os.remove(x) for x in glob.glob(os.path.join(os.path.dirname(filepath), "ram_usage*"))]
+        with open(filepath, "w") as f:
+            print("writing to {}".format(filepath))
+            # fill with 0 values where we're missing some data
+            for ram_usage in ram_usages:
+                ram_usage["usage"] = all_daemons_found | (ram_usage.get("usage") or {})
+            ram_usages_json = json.dumps(ram_usages)
+            print(ram_usages_json)
+            f.write(ram_usages_json)
+
+    ram_usage_threads = [threading.Thread(target=_monitor_ram_usage, args=(tgen.gears[rname],)) for rname in ["uut"]]
+    [thread.start() for thread in ram_usage_threads]
+
+    topo_running = True
     tgen.start_topology()
 
     router_list = tgen.routers()
@@ -93,6 +135,7 @@ def tgen(request):
     for rname, router in router_list.items():
         router.load_config(TopoRouter.RD_ZEBRA, "zebra.conf")
         router.load_config(TopoRouter.RD_BGP, "bgpd.conf", "-M bmp --log-level debugging")
+        print(type(router), dir(type(router)))
         setup_router_vrf(router)
 
     # Start and configure the router daemons
@@ -107,10 +150,13 @@ def tgen(request):
     time.sleep(5)
 
     print("exporting logs")
-    export_benchmark_logs(tgen, rnames=router_list.keys())
+    export_benchmark_logs(tgen, rnames=["uut"])
 
     # Teardown after last test runs
     tgen.stop_topology()
+
+    topo_running = False
+    [thread.join() for thread in ram_usage_threads]
 
 
 # Fixture that executes before each test
@@ -127,7 +173,8 @@ def get_router_id(rnode):
 @pytest.fixture(autouse=True)
 def get_router_ids(tgen):
     def _get_router_ids(rnode):
-        show_bgp_json = json.loads(run_frr_cmd(rnode, "show bgp vrfs json") or "{\"vrfs\":{}}").get("vrfs") or dict({"vrfs":{}})
+        show_bgp_json = json.loads(run_frr_cmd(rnode, "show bgp vrfs json") or "{\"vrfs\":{}}").get("vrfs") or dict(
+            {"vrfs": {}})
         print(show_bgp_json)
 
         router_id_out = dict()
@@ -139,6 +186,7 @@ def get_router_ids(tgen):
 
     for rname, router in tgen.routers().items():
         router_ids[rname] = _get_router_ids(router)
+
 
 # ===================
 # The tests functions
@@ -220,10 +268,32 @@ def test_connectivity(tgen):
     _show_all(uut)
 
 
-def get_pids(router: list[str]):
+def get_pids(router: TopoRouter):
     pid_files = router.run("ls -1 /var/run/frr/*.pid")
+    if re.search(r"No such file or directory", pid_files):
+        return {}
+
     pid_files = pid_files.split("\n")
-    return pid_files
+    logger.info("PID FILES " + str(pid_files))
+    print("PID FILES " + str(pid_files))
+
+    return {pid_file.split("/")[-1].split(".pid")[0]: pid_file for pid_file in pid_files if
+            pid_file.startswith("/") and pid_file.endswith(".pid")}
+
+
+def get_router_ram_usages(rnode):
+    pid_files = get_pids(rnode)
+    logger.info("pidFiles = " + str(pid_files))
+    ram_usages = dict()
+    for name, path in pid_files.items():
+        try:
+            pid = int(rnode.cmd_raises("cat %s" % path, warn=False).strip())
+            ram_usage = rnode.run("pmap " + str(pid) + " | tail -n 1 | awk '/[0-9]K/{print $2}'")
+            ram_usages[name] = int(ram_usage.strip()[:-1] or '0') * 1000
+        except:
+            ram_usages[name] = 0
+
+    return ram_usages
 
 
 def test_query_ram_usage(tgen):
@@ -234,17 +304,7 @@ def test_query_ram_usage(tgen):
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
-    pid_files = get_pids(uut)
-    logger.info("pidFiles = " + str(pid_files))
-    ram_usages = dict()
-    for pidFile in [pidFile for pidFile in pid_files if pidFile != ""]:
-        pid = int(uut.cmd_raises("cat %s" % pidFile, warn=False).strip())
-        ram_usage = uut.run("pmap " + str(pid) + " | tail -n 1 | awk '/[0-9]K/{print $2}'")
-
-        name = pidFile.split("/")[-1].split(".pid")[0]
-
-        ram_usages[name] = int(ram_usage.strip()[:-1]) * 1000
-
+    ram_usages = get_router_ram_usages(uut)
     print("ram usages : " + str(ram_usages))
 
 
@@ -284,19 +344,27 @@ def test_prefix_spam(tgen):
 
         return thread
 
-    ref_file = "{}/{}".format(CWD, prefix_file)
+    def _norm_slice(arr, start_perc, end_perc):
+        print(f"slicing from {start_perc * 100.0}% to {end_perc * 100.0}%")
+        return arr[int(start_perc * len(arr)):int(end_perc * len(arr))]
 
+    ref_file = "{}/{}".format(CWD, prefix_file)
+    spammers = [("ce1", 200), ("p1", 101)]  # rname, asn
+    spammer_count = len(spammers)
     threads = []
-    for spammer in [("ce1", 200), ("p1", 101), ("p2", 102)]:
-        spammer = (tgen.gears[spammer[0]], spammer[1])
-        with open(ref_file) as file: __send_prefixes_cmd(spammer, json.load(file).get("prefixes"), True)
-        thread = _run_periodic_prefixes(spammer, ref_file, 2, 1000)
-        threads.append(thread)
-        thread.start()
+
+    with open(ref_file) as file:
+        prefixes = json.load(file).get("prefixes")
+        for idx, spammer in enumerate(spammers):
+            spammer = (tgen.gears[spammer[0]], spammer[1])
+            __send_prefixes_cmd(spammer,
+                                _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count),
+                                True)
+            thread = _run_periodic_prefixes(spammer, ref_file, 10, 1000)
+            threads.append(thread)
+            thread.start()
 
     while True in [thread.is_alive() for thread in threads]:
-        uut.vtysh_cmd("show bgp all")
-        tgen.gears["prvdr1"].vtysh_cmd("show bgp all")
         time.sleep(0.5)
 
     [thread.join() for thread in threads]
@@ -305,7 +373,7 @@ def test_prefix_spam(tgen):
 def export_benchmark_logs(tgen, rnames=None, routers=None):
     def _export_file(router, file_from, file_to):
         content = router.cmd_raises(f"cat {file_from}")
-        print(content)
+        # print(content)
         dir_to = os.path.dirname(file_to)
         os.makedirs(dir_to, exist_ok=True)
 
@@ -320,18 +388,16 @@ def export_benchmark_logs(tgen, rnames=None, routers=None):
 
     def _export_files(router, logdir, prefix):
         def _is_right_file(file_path):
-            print("right file ? path={}, prefix={}, ids={}".format(file_path, prefix, get_router_id(router)))
             for vrf_name, rid in get_router_id(router).items():
-                print("check", prefix % rid)
                 if prefix % rid in file_path:
                     return True
 
             return False
 
-        print(_list_files(router, logdir))
         logger.info("exporting benchmark logs")
         to_dir = f"{CWD}/{router.name}/benchmark"
-        [os.remove(f) for f in glob.glob(os.path.join(to_dir, "*")) if not os.path.samefile(to_dir, CWD) and not os.path.isdir(f)]
+        [os.remove(f) for f in glob.glob(os.path.join(to_dir, "benchmark_*_vrf_*")) if
+         not os.path.samefile(to_dir, CWD) and not os.path.isdir(f)]
         for file in [os.path.join(logdir, x) for x in _list_files(router, logdir) if _is_right_file(x)]:
             path = os.path.join(to_dir, os.path.basename(file))
             logger.info(f"{file} -> {path}")
