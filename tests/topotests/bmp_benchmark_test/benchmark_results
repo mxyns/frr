@@ -1,0 +1,42 @@
+#!/bin/python3
+
+import json
+import os
+import sys
+import glob
+
+CWD = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(os.path.join(CWD, "../"))
+
+
+def load_files_from_router(rname):
+    fdir = os.path.join(CWD, rname, "benchmark")
+    print("Loading files from router {} in directory {}".format(rname, fdir))
+    results = list()
+    for file in glob.glob(os.path.join(fdir, "benchmark_vrf_*")):
+        with open(file) as file:
+            res = json.load(file)
+            # eliminate last empty event
+            res["events"] = [x for x in res.get("events") if bool(x)]
+            results.append(res)
+
+    return results
+
+
+def match_events(vrf_log_json):
+
+
+
+
+
+def main():
+    logs = load_files_from_router("uut")
+
+    for vrf_log in logs:
+        matches = match_events(vrf_log)
+        print(matches)
+
+
+
+if __name__ == "__main__":
+    main()

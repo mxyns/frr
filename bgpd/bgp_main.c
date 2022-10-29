@@ -178,6 +178,91 @@ void sigusr1(void)
 	zlog_rotate();
 }
 
+static ssize_t bgp_print_rd(struct prefix_rd *rd, char* buf, size_t len) {
+	uint16_t type;
+	struct rd_as rd_as = {0};
+	struct rd_ip rd_ip = {0};
+	const uint8_t *pnt;
+
+	if (!rd)
+		return 0;
+
+	pnt = rd->val;
+
+	/* Decode RD type. */
+	type = decode_rd_type(pnt);
+
+	/* Decode RD value. */
+	if (type == RD_TYPE_AS)
+		decode_rd_as(pnt + 2, &rd_as);
+	else if (type == RD_TYPE_AS4)
+		decode_rd_as4(pnt + 2, &rd_as);
+	else if (type == RD_TYPE_IP)
+		decode_rd_ip(pnt + 2, &rd_ip);
+
+	if (type == RD_TYPE_AS
+	    || type == RD_TYPE_AS4)
+		return snprintfrr(buf, len, "%u:%d", rd_as.as,
+				  rd_as.val);
+	else if (type == RD_TYPE_IP)
+		return snprintfrr(buf, len, "%pI4:%d",
+				  &rd_ip.ip, rd_ip.val);
+
+	return 0;
+}
+
+static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack *stack, size_t index, struct bgp_bench *entry, void* extra) {
+
+	FILE *file = (FILE *) extra;
+	static char prd_str[32];
+	memset(prd_str, 0, 32);
+	bgp_print_rd(entry->safi == SAFI_MPLS_VPN ? &entry->prefix_rd : NULL, prd_str, 32);
+
+	static char line[512];
+	memset(line, 0, 512);
+
+	ssize_t written = snprintfrr(line, 512, "{"
+				     "\"timestamp\": %lu, "
+				     "\"mem_usage\": %lu, "
+				     "\"ingress\": %d, "
+				     "\"withdraw\": %d, "
+				     "\"afi_safi\": \"%s\", "
+				     "\"peer_id\": \"%pI4\", "
+				     "\"prefix\": \"%pFX\", "
+				     "\"rd\": \"%s\"}",
+				     entry->timestamp,
+				     log->alloc_size,
+				     entry->is_ingress,
+				     entry->is_withdraw,
+				     get_afi_safi_str(entry->afi, entry->safi, true),
+				     &entry->peerid,
+				     &entry->prefix,
+				     prd_str
+	);
+	int file_written = fprintf(file, "%s,\n", line);
+	zlog_debug("dump ingress = %d == %s written=%ld, file_written=%d", entry->is_ingress, entry->is_ingress == true ? "true" : "false", written, file_written);
+}
+
+static void bgp_dump_benchlog(struct bgp *bgp) {
+	char path[128] = {0};
+	memset(path, 0, 128);
+	snprintfrr(path, 128, "/tmp/benchmark_%pI4_vrf_%d", &bgp->router_id, bgp->vrf_id + 1);
+	FILE * logfile = fopen(path, "w+");
+	if (logfile == NULL) {
+		zlog_info("[bgp][benchmark] DUMP: CANT OPEN FILE %s reason %s", path, strerror(errno));
+		return;
+	}
+	zlog_info("dumping for bgp vrf %d fd %d", bgp->vrf_id, fileno(logfile));
+	time_t now = lml_time();
+	fprintf(logfile, "{ \"title\": \"BGP BENCHMARK\", \"vrf\": %d, \"timestamp\": %lu, \"events\": [\n", bgp->vrf_id, now);
+	bgp_bench_log_dump(bgp->bgp_bench_log, bgp_dump_bench_log, (void*) logfile);
+	fprintf(logfile, "{}]}\n");
+	if (fclose(logfile) != 0) {
+		zlog_debug("close file after write : %s", strerror( errno ));
+		return;
+	}
+}
+
 /*
   Try to free up allocations we know about so that diagnostic tools such as
   valgrind are able to better illuminate leaks.
@@ -201,7 +286,10 @@ static __attribute__((__noreturn__)) void bgp_exit(int status)
 	bgp_evpn = bgp_get_evpn();
 
 	/* reverse bgp_master_init */
+	zlog_info("HEY");
 	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
+		bgp_dump_benchlog(bgp);
+
 		if (bgp_default == bgp || bgp_evpn == bgp)
 			continue;
 		bgp_delete(bgp);

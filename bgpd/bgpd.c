@@ -8080,66 +8080,11 @@ void bgp_init(unsigned short instance)
 	cmd_variable_handler_register(bgp_viewvrf_var_handlers);
 }
 
-static ssize_t bgp_print_rd(struct prefix_rd *rd, char* buf, size_t len) {
-	uint16_t type;
-	struct rd_as rd_as = {0};
-	struct rd_ip rd_ip = {0};
-	const uint8_t *pnt;
-
-	if (!rd)
-		return 0;
-
-	pnt = rd->val;
-
-	/* Decode RD type. */
-	type = decode_rd_type(pnt);
-
-	/* Decode RD value. */
-	if (type == RD_TYPE_AS)
-		decode_rd_as(pnt + 2, &rd_as);
-	else if (type == RD_TYPE_AS4)
-		decode_rd_as4(pnt + 2, &rd_as);
-	else if (type == RD_TYPE_IP)
-		decode_rd_ip(pnt + 2, &rd_ip);
-
-	if (type == RD_TYPE_AS
-	    || type == RD_TYPE_AS4)
-		return snprintfrr(buf, len, "%u:%d", rd_as.as,
-			rd_as.val);
-	else if (type == RD_TYPE_IP)
-		return snprintfrr(buf, len, "%pI4:%d",
-			&rd_ip.ip, rd_ip.val);
-
-	return 0;
-}
 
 time_t lml_time(void) {
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	return now.tv_sec * 1000000000 + now.tv_nsec;
-}
-static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack *stack, size_t index, struct bgp_bench *entry, void* extra) {
-
-	FILE *file = (FILE *) extra;
-	static char prd_str[32];
-	memset(prd_str, 0, 32);
-	bgp_print_rd(entry->safi == SAFI_MPLS_VPN ? &entry->prefix_rd : NULL, prd_str, 32);
-
-	static char line[512];
-	memset(line, 0, 512);
-
-	snprintfrr(line, 512, "[%lu][%lu][%s-%s][%s] %pI4 %s %pFX rd{%s}",
-		   entry->timestamp,
-		   log->alloc_size,
-		   entry->is_ingress == true ? "I" : "O",
-		   entry->is_withdraw == true ? "WTHDR" : "UPDT",
-		   get_afi_safi_str(entry->afi, entry->safi, false),
-		   &entry->peerid,
-		   entry->is_ingress == true ? "->" : "<-",
-		   &entry->prefix,
-		   prd_str
-		   );
-	fprintf(file, "%s\n", line);
 }
 
 void bgp_terminate(void)
@@ -8158,24 +8103,9 @@ void bgp_terminate(void)
 	 * a dangling connection
 	 */
 
-	zlog_info("STOPPING BGP LOL");
 	bgp_close();
 	/* reverse bgp_master_init */
 	for (ALL_LIST_ELEMENTS(bm->bgp, mnode, mnnode, bgp)) {
-		mode_t oldumask = umask(0777 & ~LOGFILE_MASK);
-		zlog_info("dumping for bgp vrf %d", bgp->vrf_id);
-		char path[128] = {0};
-		snprintf(path, 128, "/tmp/benchmark_vrf_%d", bgp->vrf_id);
-		FILE * logfile = fopen(path, "w+");
-		if (logfile == NULL) {
-			zlog_info("[bgp][benchmark] DUMP: CANT OPEN FILE %s", path);
-		}
-		time_t now = monotime(NULL);
-		fprintf(logfile, "# BGP BENCHMARK VRF %d @ %lu\n", bgp->vrf_id, now);
-		bgp_bench_log_dump(bgp->bgp_bench_log, bgp_dump_bench_log, (void*) logfile);
-		fclose(logfile);
-		umask(oldumask);
-
 		bgp_close_vrf_socket(bgp);
 		for (ALL_LIST_ELEMENTS(bgp->peer, node, nnode, peer)) {
 			if (BGP_PEER_GRACEFUL_RESTART_CAPABLE(peer)) {

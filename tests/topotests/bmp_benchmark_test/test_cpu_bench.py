@@ -15,10 +15,13 @@ from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
 from lib.bgp import verify_bgp_convergence_from_running_config
 
-from tests.topotests.lib.common_config import stop_router
+from tests.topotests.lib.common_config import stop_router, run_frr_cmd
+from tests.topotests.lib.topotest import frr_unicode
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
+
+prefix_file = "prefixes.json"
 
 # TODO: select markers based on daemons used during test
 # pytest module level markers
@@ -42,6 +45,7 @@ pytestmark = [
     # pytest.mark.vrrpd,
 ]
 
+router_ids = dict()
 
 # Function we pass to Topogen to create the topology
 def build_topo(tgen):
@@ -88,7 +92,7 @@ def tgen(request):
 
     for rname, router in router_list.items():
         router.load_config(TopoRouter.RD_ZEBRA, "zebra.conf")
-        router.load_config(TopoRouter.RD_BGP, "bgpd.conf")
+        router.load_config(TopoRouter.RD_BGP, "bgpd.conf", "-M bmp --log-level debugging")
         setup_router_vrf(router)
 
     # Start and configure the router daemons
@@ -102,7 +106,8 @@ def tgen(request):
 
     time.sleep(5)
 
-    export_benchmark_logs(tgen, rnames=["uut"])
+    print("exporting logs")
+    export_benchmark_logs(tgen, rnames=router_list.keys())
 
     # Teardown after last test runs
     tgen.stop_topology()
@@ -114,6 +119,26 @@ def skip_on_failure(tgen):
     if tgen.routers_have_failure():
         pytest.skip("skipped because of previous test failure")
 
+
+def get_router_id(rnode):
+    return router_ids.get(rnode.name)
+
+
+@pytest.fixture(autouse=True)
+def get_router_ids(tgen):
+    def _get_router_ids(rnode):
+        show_bgp_json = json.loads(run_frr_cmd(rnode, "show bgp vrfs json") or "{\"vrfs\":{}}").get("vrfs") or dict({"vrfs":{}})
+        print(show_bgp_json)
+
+        router_id_out = dict()
+        for vrf_name, vrf_obj in show_bgp_json.items():
+            print("{} = {}".format(vrf_name, vrf_obj.get("routerId")))
+            router_id_out[vrf_name] = vrf_obj.get("routerId")
+
+        return router_id_out if bool(router_id_out) else get_router_id(rnode)
+
+    for rname, router in tgen.routers().items():
+        router_ids[rname] = _get_router_ids(router)
 
 # ===================
 # The tests functions
@@ -251,7 +276,7 @@ def test_prefix_spam(tgen):
         __send_prefixes_cmd(gear, prefixes, False)
 
     def _run_periodic_prefixes(gear, prefixes_path, n, interval):
-        prefixes = json.load(open(prefixes_path)).get("prefixes")
+        prefixes = set(json.load(open(prefixes_path)).get("prefixes"))
         logger.info("Loaded prefixes: " + str(prefixes))
         logger.info(f"Repeat interval is {interval}ms")
 
@@ -259,7 +284,7 @@ def test_prefix_spam(tgen):
 
         return thread
 
-    ref_file = "{}/prefixes.json".format(CWD)
+    ref_file = "{}/{}".format(CWD, prefix_file)
 
     threads = []
     for spammer in [("ce1", 200), ("p1", 101), ("p2", 102)]:
@@ -271,6 +296,7 @@ def test_prefix_spam(tgen):
 
     while True in [thread.is_alive() for thread in threads]:
         uut.vtysh_cmd("show bgp all")
+        tgen.gears["prvdr1"].vtysh_cmd("show bgp all")
         time.sleep(0.5)
 
     [thread.join() for thread in threads]
@@ -289,20 +315,30 @@ def export_benchmark_logs(tgen, rnames=None, routers=None):
 
     def _list_files(router, ls_dir):
         content = router.cmd(f"ls {ls_dir} -1 --color=never ")
+        print(f"benchmark files :\n {content}")
         return content.split("\n")
 
     def _export_files(router, logdir, prefix):
+        def _is_right_file(file_path):
+            print("right file ? path={}, prefix={}, ids={}".format(file_path, prefix, get_router_id(router)))
+            for vrf_name, rid in get_router_id(router).items():
+                print("check", prefix % rid)
+                if prefix % rid in file_path:
+                    return True
+
+            return False
+
         print(_list_files(router, logdir))
         logger.info("exporting benchmark logs")
         to_dir = f"{CWD}/{router.name}/benchmark"
         [os.remove(f) for f in glob.glob(os.path.join(to_dir, "*")) if not os.path.samefile(to_dir, CWD) and not os.path.isdir(f)]
-        for file in [os.path.join(logdir, x) for x in _list_files(router, logdir) if prefix in x]:
+        for file in [os.path.join(logdir, x) for x in _list_files(router, logdir) if _is_right_file(x)]:
             path = os.path.join(to_dir, os.path.basename(file))
             logger.info(f"{file} -> {path}")
             _export_file(router, file, path)
 
     for router in (routers or [tgen.gears[x] for x in rnames] if rnames is not None else []):
-        _export_files(router, "/tmp", "benchmark_vrf_")
+        _export_files(router, "/tmp", "benchmark_%s_vrf_")
 
 
 if __name__ == "__main__":
