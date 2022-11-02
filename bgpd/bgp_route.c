@@ -3368,6 +3368,29 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		bgp_path_info_reap(dest, old_select);
 
 	UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
+
+	if (old_select && old_select == new_select
+	    && !CHECK_FLAG(dest->flags, BGP_NODE_USER_CLEAR)
+	    && !CHECK_FLAG(old_select->flags, BGP_PATH_ATTR_CHANGED)
+	    && !bgp_addpath_is_addpath_used(&bgp->tx_addpath, afi, safi)) {
+		struct prefix_rd dummy_prd = {0};
+		struct prefix_rd *prd_ref = NULL;
+		if (!(afi == AFI_IP && safi == SAFI_UNICAST) && new_select->net->pdest)
+			prd_ref = (struct prefix_rd *)bgp_dest_get_prefix(new_select->net->pdest);
+		bgp_bench_log_push(bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_withdraw = new_select->attr == NULL,
+					   .is_leak = 2,
+					   .is_ingress = -1,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = new_select->peer->remote_id,
+					   .prefix = *bgp_dest_get_prefix(dest),
+					   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
+				   });
+	}
+
 	return;
 }
 
@@ -6097,6 +6120,7 @@ int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr,
         bgp_bench_log_push(peer->bgp->bgp_bench_log,
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
+					   .is_leak = false,
 					   .is_withdraw = attr == NULL,
 					   .is_ingress = true,
 					   .afi = afi,

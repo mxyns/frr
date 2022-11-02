@@ -75,6 +75,45 @@ extern int argv_find_and_parse_vpnvx(struct cmd_token **argv, int argc,
 	return ret;
 }
 
+
+static void vpn_log_leak(struct bgp *from_bgp,
+			 struct bgp *to_bgp,
+			 afi_t afi,
+			 safi_t safi,
+			 struct prefix p,
+			 struct bgp_dest *pdest,
+			 struct prefix_rd *prd_ref,
+			 bool withdraw
+) {
+	struct prefix_rd dummy_prd = {0};
+	if (!prd_ref && !(afi == AFI_IP && safi == SAFI_UNICAST) && pdest)
+		prd_ref = (struct prefix_rd *)bgp_dest_get_prefix(pdest);
+	bgp_bench_log_push(from_bgp->bgp_bench_log,
+			   (struct bgp_bench) {
+				   .timestamp = lml_time(),
+				   .is_leak = true,
+				   .is_withdraw = withdraw,
+				   .is_ingress = false,
+				   .afi = afi,
+				   .safi = safi,
+				   .peerid = to_bgp->router_id,
+				   .prefix = p,
+				   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
+			   });
+	bgp_bench_log_push(to_bgp->bgp_bench_log,
+			   (struct bgp_bench) {
+				   .timestamp = lml_time(),
+				   .is_leak = true,
+				   .is_withdraw = withdraw,
+				   .is_ingress = true,
+				   .afi = afi,
+				   .safi = safi,
+				   .peerid = from_bgp->router_id,
+				   .prefix = p,
+				   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
+			   });
+}
+
 uint32_t decode_label(mpls_label_t *label_pnt)
 {
 	uint32_t l;
@@ -263,6 +302,7 @@ int bgp_nlri_parse_vpn(struct peer *peer, struct attr *attr,
 		bgp_bench_log_push(peer->bgp->bgp_bench_log,
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
+					   .is_leak = false,
 					   .is_withdraw = attr == NULL,
 					   .is_ingress = true,
 					   .afi = afi,
@@ -1656,6 +1696,7 @@ void vpn_leak_from_vrf_update(struct bgp *to_bgp,	     /* to */
 		leak_update(to_bgp, bn, new_attr, afi, safi, path_vrf, &label,
 			    1, from_bgp, NULL, nexthop_self_flag, debug);
 
+	vpn_log_leak(from_bgp, to_bgp, afi, safi, *p, bn->pdest, NULL, false);
 	/*
 	 * Routes actually installed in the vpn RIB must also be
 	 * offered to all vrfs (because now they originate from
@@ -1732,6 +1773,8 @@ void vpn_leak_from_vrf_withdraw(struct bgp *to_bgp,		/* to */
 		bgp_aggregate_decrement(to_bgp, p, bpi, afi, safi);
 		bgp_path_info_delete(bn, bpi);
 		bgp_process(to_bgp, bn, afi, safi);
+
+		vpn_log_leak(from_bgp, to_bgp, afi, safi, *p, bn->pdest, NULL, true);
 	}
 	bgp_dest_unlock_node(bn);
 }
@@ -1788,6 +1831,8 @@ void vpn_leak_from_vrf_withdraw_all(struct bgp *to_bgp, struct bgp *from_bgp,
 						bpi, afi, safi);
 					bgp_path_info_delete(bn, bpi);
 					bgp_process(to_bgp, bn, afi, safi);
+
+					vpn_log_leak(from_bgp, to_bgp, afi, safi, *bgp_dest_get_prefix(bn), bn->pdest, NULL, true);
 				}
 			}
 		}
@@ -2076,6 +2121,10 @@ static bool vpn_leak_to_vrf_update_onevrf(struct bgp *to_bgp,   /* to */
 	leak_update(to_bgp, bn, new_attr, afi, safi, path_vpn, pLabels,
 		    num_labels, src_vrf, &nexthop_orig, nexthop_self_flag,
 		    debug);
+
+
+	vpn_log_leak(from_bgp, to_bgp, afi, safi, *p, bn->pdest, prd, false);
+
 	return true;
 }
 
@@ -2186,6 +2235,8 @@ void vpn_leak_to_vrf_withdraw(struct bgp *from_bgp,	   /* from */
 			bgp_process(bgp, bn, afi, safi);
 		}
 		bgp_dest_unlock_node(bn);
+
+		vpn_log_leak(from_bgp, bgp, afi, safi, *p, bn->pdest, NULL, true);
 	}
 }
 
@@ -2216,6 +2267,8 @@ void vpn_leak_to_vrf_withdraw_all(struct bgp *to_bgp, afi_t afi)
 							bpi, afi, safi);
 				bgp_path_info_delete(bn, bpi);
 				bgp_process(to_bgp, bn, afi, safi);
+
+				vpn_log_leak(bpi->extra->bgp_orig, to_bgp, afi, safi, *bgp_dest_get_prefix(bn), bn->pdest, NULL, true);
 			}
 		}
 	}

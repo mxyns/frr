@@ -823,6 +823,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 		bgp_bench_log_push(peer->bgp->bgp_bench_log,
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
+					   .is_leak = false,
 					   .is_withdraw = false,
 					   .is_ingress = false,
 					   .afi = afi,
@@ -1029,6 +1030,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		bgp_bench_log_push(peer->bgp->bgp_bench_log,
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
+					   .is_leak = false,
 					   .is_withdraw = true,
 					   .is_ingress = false,
 					   .afi = afi,

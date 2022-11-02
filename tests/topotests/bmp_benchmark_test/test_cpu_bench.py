@@ -21,7 +21,9 @@ from tests.topotests.lib.common_config import run_frr_cmd
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
-prefix_file = "routeviews_prefixes.json"
+# prefix_file = "prefixes.json"
+# prefix_file = "routeviews_prefixes.json"
+prefix_file = "prefixes_single.json"
 
 # TODO: select markers based on daemons used during test
 # pytest module level markers
@@ -102,13 +104,13 @@ def tgen(request):
         # wait for topology to stop
         while topo_running:
             usage = get_router_ram_usages(rnode)
-            logger.info("adding value" + str(usage))
+            logger.info("adding {} values".format(len(usage.keys())))
             ram_usages.append({"timestamp": time.time_ns(), "usage": usage})
 
             # keep one good usage with most information possible
             if usage != {}:
                 # add keys but with 0 value
-                all_daemons_found = all_daemons_found | {k: 0 for k in usage.keys()}
+                all_daemons_found = all_daemons_found | {k: {"total": 0, "details": []} for k in usage.keys()}
 
             time.sleep(0.1)
 
@@ -288,10 +290,11 @@ def get_router_ram_usages(rnode):
     for name, path in pid_files.items():
         try:
             pid = int(rnode.cmd_raises("cat %s" % path, warn=False).strip())
-            ram_usage = rnode.run("pmap " + str(pid) + " | tail -n 1 | awk '/[0-9]K/{print $2}'")
-            ram_usages[name] = int(ram_usage.strip()[:-1] or '0') * 1000
+            ram_usage = rnode.run("pmap " + str(pid))
+            ram_usage_total = int(ram_usage.strip().split("\n")[-1].split()[-1].strip()[:-1] or '0') * 1000
+            ram_usages[name] = {"total": ram_usage_total, "details": ram_usage.split("\n")}
         except:
-            ram_usages[name] = 0
+            ram_usages[name] = {}
 
     return ram_usages
 

@@ -381,6 +381,7 @@ LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT
 		LML_NO_OPT,
 		{
 			time_t timestamp;
+			bool is_leak;
 			bool is_withdraw;
 			bool is_ingress;
 			afi_t afi;

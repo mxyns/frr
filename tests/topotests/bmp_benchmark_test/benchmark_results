@@ -1,12 +1,29 @@
 #!/bin/python3
-
+import functools
 import glob
 import json
 import os
+import re
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import ticker
+from matplotlib.lines import Line2D
+
+###
+
+# need to ensure change when doing prefix announcements because
+# ingress[UPDT/WITHDRW] => outgress[UPDT/WITHDRW] or None if no change
+#
+
+# when leaking between vrf
+# which messages are from leaking ? peerid in list[router_id]
+# outgress from vrf src => ingress from vrf dest => outgress to peers
+# event match in vrf dest is ingress from vrf dest to outgress to peers
+# need to match ingress.is_leak && !outgress.is_leak && ingress.pfx == outgress.pfx && ingress.time < outgress.time
+###
+
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
@@ -21,6 +38,10 @@ def load_files_from_router(rname):
             res = json.load(file)
             # eliminate last empty event
             res["events"] = [x for x in res.get("events") if bool(x)]
+            leaks = [x for x in res.get("events") if bool(x.get("leak"))]
+            # res["events"] = [x for x in res.get("events") if not bool(x.get("leak"))]
+            # print(leaks)
+
             benchmark_logs.append(res)
 
     ram_usage = []
@@ -40,24 +61,41 @@ def unzip_ingress_outgress(vrf_log_json):
         return event
 
     ref_timestamp = vrf_log_json.get("events")[0].get("timestamp")
-    return [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if
-            x.get("ingress") == 1], [_normalize_timestamp(x, ref_timestamp) for x in
-                                     vrf_log_json.get("events") if x.get("ingress") == 0]
+    return [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if x.get("ingress") == 1], \
+           [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if
+            x.get("ingress") == 0 and x.get("leak") == 0], \
+           [x for x in vrf_log_json.get("events")]
 
 
 # take object {timestamp:number, events:[])}
 # separate ingress and outgress
 # find next outgress msg related to prefix of each ingress msg
 # return [ingress, next_outgress]
-def match_events(vrf_log_json):
-    def _find_prefix_after(events, prefix, timestamp):
-        return next(filter(lambda event: event.get("prefix") == prefix and event.get("timestamp") >= timestamp, events),
-                    None)
+def match_events(vrf_info, vrf_log_json):
+    def _find_prefix_after_msg(events_list, trig_event):
+        return next(filter(
+            lambda event: event.get("timestamp") >= trig_event.get("timestamp")
+                          and event.get("prefix") == trig_event.get("prefix"),
+            events_list), None)
 
-    ingress, outgress = unzip_ingress_outgress(vrf_log_json)
+    def _is_leak(event):
+        return bool(event.get("leak"))
 
-    return [(ingress_x, _find_prefix_after(outgress, ingress_x.get("prefix"), ingress_x.get("timestamp"))) for ingress_x
-            in ingress]
+    def _find_prefix_after_leak(events_all, trig_event):
+        # ingress.is_leak && !outgress.is_leak && ingress.pfx == outgress.pfx && ingress.time < outgress.time
+        return next(filter(
+            lambda event: _is_leak(trig_event)
+                          and not _is_leak(event)
+                          and event.get("timestamp") >= trig_event.get("timestamp")
+                          and event.get("prefix") == trig_event.get("prefix"),
+            events_all), None)
+
+    ingress, outgress, normalized_all = unzip_ingress_outgress(vrf_log_json)
+
+    return [(ingress_x, (_find_prefix_after_msg(outgress, ingress_x)
+                         if not _is_leak(ingress_x)
+                         else _find_prefix_after_leak(normalized_all, ingress_x)
+                         )) for ingress_x in ingress]
 
 
 # take {timestamp:number, events:[]}
@@ -73,13 +111,7 @@ def json_obj_split_series(obj):
     return dict(zip(obj[0].keys(), zip(*[r.values() for r in obj])))
 
 
-def main():
-    # TODO add prefix ticks
-
-    plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-
-    logs, ram_usage = load_files_from_router("uut")
-
+def plot_ram_usage(ram_usage):
     print("plotting ram usage")
     per_process_ram_usage = json_obj_split_series(ram_usage)
     per_process_ram_usage = per_process_ram_usage | json_obj_split_series(per_process_ram_usage.get("usage"))
@@ -90,7 +122,7 @@ def main():
     for idx, (process, mem_use) in enumerate(
             {k: per_process_ram_usage[k] for k in
              set(per_process_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
-        ax.plot(labels, np.array(mem_use) * 1e-6, label=f"{process} daemon")
+        ax.plot(labels, np.array(list(map(lambda x: x.get("total"), mem_use))) * 1e-6, label=f"{process} daemon")
     ax.set_ylabel("Memory Usage (MB)")
     ax.legend()
     plt.suptitle("FRR Daemons RAM Usage Monitoring")
@@ -98,15 +130,41 @@ def main():
         per_process_ram_usage["timestamp"] - np.min(per_process_ram_usage["timestamp"])) * 1e-9))
     plt.show()
 
+    def _get_lib_usage(entry, lib):
+        return sum(
+            map(lambda x: int(x.split(maxsplit=2)[1][:-1] or '0') * 1000,
+                filter(lambda x: lib in x, entry.get("details"))))
+
+    ax = plt.gca()
+    ax.bar(labels,
+           np.array(
+               list(
+                   map(
+                       functools.partial(_get_lib_usage, lib="bgpd_bmp.so"),
+                       per_process_ram_usage["bgpd"]
+                   )
+               )
+           ) * 1e-9,
+           width=10
+           )
+    ax.set_ylabel("BMP Memory Usage (MB)")
+    ax.legend()
+    plt.suptitle("FRR BMP RAM Usage Monitoring")
+    plt.title("{} samples over {} seconds".format(len(labels), np.max(
+        per_process_ram_usage["timestamp"] - np.min(per_process_ram_usage["timestamp"])) * 1e-9))
+    plt.show()
+
+
+def plot_cpu_usage(logs, matches):
     print("plotting cpu usage")
     fig, axs = plt.subplots(len(logs), 1, figsize=(6.4, 2. * 4.8))
     for i, vrf_log in enumerate(logs):
-        matches = match_events(vrf_log)
+        match = matches[i]
 
         # for each in/out msg match -> (in.timestamp, time_between(in, out))
         in_timestamp__duration = lambda: map(lambda t: (
             t[0].get("timestamp") * 1e-9, (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9),
-                                             filter(lambda t: None not in t, matches))
+                                             filter(lambda t: None not in t, match))
         # split timestamps and durations. keep on durations
         durations = list(zip(*in_timestamp__duration()))[1]
         ln1 = axs[i].plot(durations, color=plt_colors[0], label='cpu latency (ms)')
@@ -121,9 +179,108 @@ def main():
         fig.legend(lns, [ln.get_label() for ln in lns])
 
         axs[i].set_title("FRR Daemons CPU Usage Monitoring\n{} samples over {} seconds".format(len(durations),
-                sum(list(in_timestamp__duration())[-1]) - matches[0][0].get("timestamp") * 1e-9))
+                                                                                               sum(list(
+                                                                                                   in_timestamp__duration())[
+                                                                                                       -1]) -
+                                                                                               match[0][0].get(
+                                                                                                   "timestamp") * 1e-9))
 
     plt.show()
+
+
+plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
+
+def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=10.):
+    print("plotting gantt")
+    fig, axs = plt.subplots(len(logs), 1, figsize=(6.4 * fig_scale[0], fig_scale[1] * 4.8))
+    for i, vrf_log in enumerate(logs):
+        match = matches[i]
+
+        def in_timestamp__duration__out_timestamp():
+            return map(lambda t: (
+                t[0].get("prefix"),
+                "{}->{}".format("W" if bool(t[0].get("withdraw")) else "U", "W" if bool(t[1].get("withdraw")) else "U"),
+                t[0].get("timestamp") * 1e-9,
+                (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9,
+                t[1].get("timestamp") * 1e-9),
+                       filter(lambda t: None not in t, match))
+
+        prefix, withdraws, in_timestamp, duration, out_timestamp = zip(*in_timestamp__duration__out_timestamp())
+
+        index_to_prefix = list(set(map(lambda t: t[0].get("prefix"), filter(lambda t: None not in t, match))))
+        prefix_to_index = {prefix: index for index, prefix in enumerate(index_to_prefix)}
+        counters = {prefix: 0 for prefix in index_to_prefix}
+
+        def _get_height_for_prefix(p):
+            x = prefix_to_index[p] + (counters[p] / tick_scale) % 1.0
+            counters[p] += 1
+            return x
+
+        series_settings = {"W->W": "red", "U->U": "green", "U->W": "orange", "W->U": "blue"}
+
+        def _color_mapper(x):
+            return series_settings.get(x)
+
+        color_mapper = np.vectorize(_color_mapper)
+
+        # TODO map height to ingress peer_id
+
+        legend_elements = [Line2D([], [], label=lbl, color=clr) for lbl, clr in series_settings.items()]
+        plt.legend(handles=legend_elements)
+
+        y = list(map(_get_height_for_prefix, prefix))
+        axs[i].hlines(y, in_timestamp, out_timestamp, colors=color_mapper(withdraws), lw=2.5)
+        axs[i].hlines([index - 0.05 for index in range(len(prefix_to_index))], 0, 1e40, colors="grey", lw=0.5)
+
+        def _labels_formatter(y, pos):
+            return index_to_prefix.__getitem__(int(y)) if 0 <= int(y) < len(index_to_prefix) and int(y) == y else ""
+
+        axs[i].set_ylim([0, len(prefix_to_index)])
+        axs[i].set_xlim([0, np.max(out_timestamp)])
+        axs[i].yaxis.set_major_formatter(
+            ticker.FuncFormatter(_labels_formatter))
+    plt.gcf().tight_layout()
+    plt.show()
+
+
+def load_vrf_info(logs):
+    return {log["router_id"]: {k: log[k] for k in ["router_id", "vrf", "vrf_name"]} for log in logs}
+
+
+def main():
+    # TODO add prefix ticks
+
+    logs, ram_usage = load_files_from_router("uut")
+
+    vrf_info = load_vrf_info(logs)
+    print("vrf infos: \n", vrf_info)
+
+    plot_ram_usage(ram_usage)
+
+    print("matching events")
+    matches = [match_events(vrf_info, vrf_log) for vrf_log in logs]
+
+    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
+
+    plot_cpu_usage(logs, matches)
+
+    for match in matches:
+        def in_timestamp__duration__out_timestamp():
+            return map(lambda t: (
+                t[0].get("prefix"),
+                "{}->{}".format("W" if bool(t[0].get("withdraw")) else "U", "W" if bool(t[1].get("withdraw")) else "U"),
+                t[0].get("timestamp") * 1e-9,
+                (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9,
+                t[1].get("timestamp") * 1e-9,
+                bool(t[0].get("leak")),
+            ),
+                       filter(lambda t: None not in t, match))
+
+        prefix, withdraws, in_timestamp, duration, out_timestamp, leak = zip(*in_timestamp__duration__out_timestamp())
+        data = np.array(list(zip(duration, leak)))
+        [np.mean(data[data[:, 1] == x], axis=0) for x in [0, 1]]
+        # => leaking is faster than sending messages => makes sense
 
 
 if __name__ == "__main__":

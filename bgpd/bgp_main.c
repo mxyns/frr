@@ -224,6 +224,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 	ssize_t written = snprintfrr(line, 512, "{"
 				     "\"timestamp\": %lu, "
 				     "\"mem_usage\": %lu, "
+				     "\"leak\": %d, "
 				     "\"ingress\": %d, "
 				     "\"withdraw\": %d, "
 				     "\"afi_safi\": \"%s\", "
@@ -232,6 +233,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     "\"rd\": \"%s\"}",
 				     entry->timestamp,
 				     log->alloc_size,
+				     entry->is_leak,
 				     entry->is_ingress,
 				     entry->is_withdraw,
 				     get_afi_safi_str(entry->afi, entry->safi, true),
@@ -246,7 +248,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 static void bgp_dump_benchlog(struct bgp *bgp) {
 	char path[128] = {0};
 	memset(path, 0, 128);
-	snprintfrr(path, 128, "/tmp/benchmark_%pI4_vrf_%d", &bgp->router_id, bgp->vrf_id + 1);
+	snprintfrr(path, 128, "/tmp/benchmark_%pI4_vrf_%d", &bgp->router_id, bgp->vrf_id);
 	FILE * logfile = fopen(path, "w+");
 	if (logfile == NULL) {
 		zlog_info("[bgp][benchmark] DUMP: CANT OPEN FILE %s reason %s", path, strerror(errno));
@@ -254,7 +256,15 @@ static void bgp_dump_benchlog(struct bgp *bgp) {
 	}
 	zlog_info("dumping for bgp vrf %d fd %d", bgp->vrf_id, fileno(logfile));
 	time_t now = lml_time();
-	fprintf(logfile, "{ \"title\": \"BGP BENCHMARK\", \"vrf\": %d, \"timestamp\": %lu, \"events\": [\n", bgp->vrf_id, now);
+
+	char vrf_name[128] = "null";
+	struct vrf *vrf = vrf_lookup_by_id(bgp->vrf_id);
+	if (vrf)
+		sprintf(vrf_name, "\"%s\"", VRF_LOGNAME(vrf));
+
+	char router_id_str[16] = {0};
+	snprintfrr(router_id_str, 16, "%pI4", &bgp->router_id);
+	fprintf(logfile, "{ \"title\": \"BGP BENCHMARK\", \"router_id\": \"%s\", \"vrf\": %d, \"vrf_name\":%s, \"timestamp\": %lu, \"events\": [\n", router_id_str, bgp->vrf_id, (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT ? "\"default\"" : vrf_name), now);
 	bgp_bench_log_dump(bgp->bgp_bench_log, bgp_dump_bench_log, (void*) logfile);
 	fprintf(logfile, "{}]}\n");
 	if (fclose(logfile) != 0) {
