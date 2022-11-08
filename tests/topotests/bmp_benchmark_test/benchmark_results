@@ -75,7 +75,13 @@ def match_events(vrf_info, vrf_log_json):
     def _find_prefix_after_msg(events_list, trig_event):
         return next(filter(
             lambda event: event.get("timestamp") >= trig_event.get("timestamp")
-                          and event.get("prefix") == trig_event.get("prefix"),
+                          and event.get("prefix") == trig_event.get("prefix")
+                          # after a non leak update/withdraw we expect
+                          #     either a leak to another vrf
+                          #     or an outgoing update/withdraw for the same afi:safi
+                          and (_is_leak(event) or
+                               (not _is_leak(event) and event.get("afi_safi") == trig_event.get("afi_safi"))
+                               ),
             events_list), None)
 
     def _is_leak(event):
@@ -87,7 +93,9 @@ def match_events(vrf_info, vrf_log_json):
             lambda event: _is_leak(trig_event)
                           and not _is_leak(event)
                           and event.get("timestamp") >= trig_event.get("timestamp")
-                          and event.get("prefix") == trig_event.get("prefix"),
+                          and event.get("prefix") == trig_event.get("prefix")
+                          and event.get("afi_safi") == trig_event.get("afi_safi"),
+            # TODO add rd equals check (shouldn't change anything)
             events_all), None)
 
     ingress, outgress, normalized_all = unzip_ingress_outgress(vrf_log_json)
@@ -250,8 +258,9 @@ def load_vrf_info(logs):
 
 def main():
     # TODO add prefix ticks
-
     logs, ram_usage = load_files_from_router("uut")
+    for log in logs:
+        pass  # log["events"] = list(filter(lambda x: not bool(x.get("leak")), log["events"]))
 
     vrf_info = load_vrf_info(logs)
     print("vrf infos: \n", vrf_info)

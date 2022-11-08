@@ -3257,6 +3257,23 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(old_select->flags, BGP_PATH_LINK_BW_CHG);
 		bgp_zebra_clear_route_change_flags(dest);
 		UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
+
+		struct prefix_rd dummy_prd = {0};
+		struct prefix_rd *prd_ref = NULL;
+		if (!(afi == AFI_IP && safi == SAFI_UNICAST) && dest->pdest)
+			prd_ref = (struct prefix_rd *)bgp_dest_get_prefix(dest->pdest);
+		bgp_bench_log_push(bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_leak = false,
+					   .is_withdraw = -1,
+					   .is_ingress = 1,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = old_select->peer->remote_id,
+					   .prefix = *bgp_dest_get_prefix(dest),
+					   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
+				   });
 		return;
 	}
 
@@ -3368,28 +3385,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		bgp_path_info_reap(dest, old_select);
 
 	UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
-
-	if (old_select && old_select == new_select
-	    && !CHECK_FLAG(dest->flags, BGP_NODE_USER_CLEAR)
-	    && !CHECK_FLAG(old_select->flags, BGP_PATH_ATTR_CHANGED)
-	    && !bgp_addpath_is_addpath_used(&bgp->tx_addpath, afi, safi)) {
-		struct prefix_rd dummy_prd = {0};
-		struct prefix_rd *prd_ref = NULL;
-		if (!(afi == AFI_IP && safi == SAFI_UNICAST) && new_select->net->pdest)
-			prd_ref = (struct prefix_rd *)bgp_dest_get_prefix(new_select->net->pdest);
-		bgp_bench_log_push(bgp->bgp_bench_log,
-				   (struct bgp_bench) {
-					   .timestamp = lml_time(),
-					   .is_withdraw = new_select->attr == NULL,
-					   .is_leak = 2,
-					   .is_ingress = -1,
-					   .afi = afi,
-					   .safi = safi,
-					   .peerid = new_select->peer->remote_id,
-					   .prefix = *bgp_dest_get_prefix(dest),
-					   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
-				   });
-	}
 
 	return;
 }
@@ -4880,6 +4875,20 @@ int bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		bgp_path_info_delete(dest, new);
 	}
 
+	struct prefix_rd dummy_prd = {0};
+	bgp_bench_log_push(peer->bgp->bgp_bench_log,
+			   (struct bgp_bench) {
+				   .timestamp = lml_time(),
+				   .is_leak = false,
+				   .is_withdraw = false,
+				   .is_ingress = true,
+				   .afi = afi,
+				   .safi = safi,
+				   .peerid = peer->remote_id,
+				   .prefix = *p,
+				   .prefix_rd = prd ? *prd : dummy_prd
+			   });
+
 	return 0;
 
 /* This BGP update is filtered.  Log the reason then update BGP
@@ -5019,6 +5028,22 @@ int bgp_withdraw(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 			vpn_leak_to_vrf_withdraw(bgp, pi);
 		}
+
+
+		struct prefix_rd dummy_prd = {0};
+		bgp_bench_log_push(peer->bgp->bgp_bench_log,
+				   (struct bgp_bench) {
+					   .timestamp = lml_time(),
+					   .is_leak = false,
+					   .is_withdraw = attr == NULL,
+					   .is_ingress = true,
+					   .afi = afi,
+					   .safi = safi,
+					   .peerid = peer->remote_id,
+					   .prefix = *p,
+					   .prefix_rd = prd ? *prd : dummy_prd
+				   });
+
 	} else if (bgp_debug_update(peer, p, NULL, 1)) {
 		bgp_debug_rdpfxpath2str(afi, safi, prd, p, label, num_labels,
 					addpath_id ? 1 : 0, addpath_id, NULL,
@@ -6116,20 +6141,6 @@ int bgp_nlri_parse_ip(struct peer *peer, struct attr *attr,
 					   safi, ZEBRA_ROUTE_BGP,
 					   BGP_ROUTE_NORMAL, NULL, NULL, 0,
 					   NULL);
-
-        bgp_bench_log_push(peer->bgp->bgp_bench_log,
-				   (struct bgp_bench) {
-					   .timestamp = lml_time(),
-					   .is_leak = false,
-					   .is_withdraw = attr == NULL,
-					   .is_ingress = true,
-					   .afi = afi,
-					   .safi = safi,
-					   .peerid = peer->remote_id,
-					   .prefix = p,
-					   .prefix_rd = { 0 }
-        });
-
 
 		/* Do not send BGP notification twice when maximum-prefix count
 		 * overflow. */

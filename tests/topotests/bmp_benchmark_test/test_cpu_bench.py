@@ -121,9 +121,9 @@ def tgen(request):
             print("writing to {}".format(filepath))
             # fill with 0 values where we're missing some data
             for ram_usage in ram_usages:
-                ram_usage["usage"] = all_daemons_found | (ram_usage.get("usage") or {})
+                ram_usage["usage"] = {k: all_daemons_found.get(k) | (ram_usage.get("usage").get(k) or {"total": 0, "details": []})
+                                      for k in all_daemons_found.keys()}
             ram_usages_json = json.dumps(ram_usages)
-            print(ram_usages_json)
             f.write(ram_usages_json)
 
     ram_usage_threads = [threading.Thread(target=_monitor_ram_usage, args=(tgen.gears[rname],)) for rname in ["uut"]]

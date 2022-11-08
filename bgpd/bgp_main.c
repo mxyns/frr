@@ -296,7 +296,6 @@ static __attribute__((__noreturn__)) void bgp_exit(int status)
 	bgp_evpn = bgp_get_evpn();
 
 	/* reverse bgp_master_init */
-	zlog_info("HEY");
 	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
 		bgp_dump_benchlog(bgp);
 
