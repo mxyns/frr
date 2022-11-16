@@ -226,7 +226,8 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     "\"mem_usage\": %lu, "
 				     "\"leak\": %d, "
 				     "\"ingress\": %d, "
-				     "\"withdraw\": %d, "
+				     "\"type\": %d, "
+				     "\"successful\": %d, "
 				     "\"afi_safi\": \"%s\", "
 				     "\"peer_id\": \"%pI4\", "
 				     "\"prefix\": \"%pFX\", "
@@ -235,14 +236,14 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     log->alloc_size,
 				     entry->is_leak,
 				     entry->is_ingress,
-				     entry->is_withdraw,
+				     entry->type,
+				     entry->is_successful,
 				     get_afi_safi_str(entry->afi, entry->safi, true),
 				     &entry->peerid,
 				     &entry->prefix,
 				     prd_str
 	);
 	int file_written = fprintf(file, "%s,\n", line);
-	zlog_debug("dump ingress = %d == %s written=%ld, file_written=%d", entry->is_ingress, entry->is_ingress == true ? "true" : "false", written, file_written);
 }
 
 static void bgp_dump_benchlog(struct bgp *bgp) {

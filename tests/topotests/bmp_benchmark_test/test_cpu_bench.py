@@ -16,14 +16,15 @@ from lib.bgp import verify_bgp_convergence_from_running_config
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
 
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _split_bgp_log, get_bgp_bmp_total_sum
 from tests.topotests.lib.common_config import run_frr_cmd
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
 # prefix_file = "prefixes.json"
-# prefix_file = "routeviews_prefixes.json"
-prefix_file = "prefixes_single.json"
+prefix_file = "routeviews_prefixes.json"
+# prefix_file = "prefixes_single.json"
 
 # TODO: select markers based on daemons used during test
 # pytest module level markers
@@ -112,8 +113,6 @@ def tgen(request):
                 # add keys but with 0 value
                 all_daemons_found = all_daemons_found | {k: {"total": 0, "details": []} for k in usage.keys()}
 
-            time.sleep(0.1)
-
         # dump mem usage results
         filepath = "{}/{}/benchmark/ram_usage".format(CWD, rnode.name)
         [os.remove(x) for x in glob.glob(os.path.join(os.path.dirname(filepath), "ram_usage*"))]
@@ -121,8 +120,9 @@ def tgen(request):
             print("writing to {}".format(filepath))
             # fill with 0 values where we're missing some data
             for ram_usage in ram_usages:
-                ram_usage["usage"] = {k: all_daemons_found.get(k) | (ram_usage.get("usage").get(k) or {"total": 0, "details": []})
-                                      for k in all_daemons_found.keys()}
+                ram_usage["usage"] = {
+                    k: all_daemons_found.get(k) | (ram_usage.get("usage").get(k) or {"total": 0, "details": []})
+                    for k in all_daemons_found.keys()}
             ram_usages_json = json.dumps(ram_usages)
             f.write(ram_usages_json)
 
@@ -269,6 +269,8 @@ def test_connectivity(tgen):
     _show_all(ce2)
     _show_all(uut)
 
+    o = tgen.gears["uut"].vtysh_cmd("do show bmp")
+
 
 def get_pids(router: TopoRouter):
     pid_files = router.run("ls -1 /var/run/frr/*.pid")
@@ -284,17 +286,19 @@ def get_pids(router: TopoRouter):
 
 
 def get_router_ram_usages(rnode):
-    pid_files = get_pids(rnode)
-    logger.info("pidFiles = " + str(pid_files))
+    # pid_files = get_pids(rnode)
+    # logger.info("pidFiles = " + str(pid_files))
+
     ram_usages = dict()
-    for name, path in pid_files.items():
-        try:
-            pid = int(rnode.cmd_raises("cat %s" % path, warn=False).strip())
-            ram_usage = rnode.run("pmap " + str(pid))
-            ram_usage_total = int(ram_usage.strip().split("\n")[-1].split()[-1].strip()[:-1] or '0') * 1000
-            ram_usages[name] = {"total": ram_usage_total, "details": ram_usage.split("\n")}
-        except:
-            ram_usages[name] = {}
+
+    try:
+        o = rnode.vtysh_cmd("show memory bgpd")
+        (bgp_total, bgp_details), (bmp_total, bmp_details) = get_bgp_bmp_total_sum(o)
+        ram_usages["bgpd"] = {"total": bgp_total, "details": bgp_details}
+        ram_usages["bmp"] = {"total": bmp_total, "details": bmp_details}
+    except Exception as e:
+        ram_usages["bmp"] = {}
+        ram_usages["bgpd"] = {}
 
     return ram_usages
 
@@ -368,7 +372,8 @@ def test_prefix_spam(tgen):
             thread.start()
 
     while True in [thread.is_alive() for thread in threads]:
-        time.sleep(0.5)
+        time.sleep(1)
+        uut.vtysh_cmd("do show bmp")
 
     [thread.join() for thread in threads]
 

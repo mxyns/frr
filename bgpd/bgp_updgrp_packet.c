@@ -824,8 +824,9 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
 					   .is_leak = false,
-					   .is_withdraw = false,
+					   .type =  0,
 					   .is_ingress = false,
+					   .is_successful = true,
 					   .afi = afi,
 					   .safi = safi,
 					   .peerid = peer->remote_id,
@@ -1031,8 +1032,9 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 				   (struct bgp_bench) {
 					   .timestamp = lml_time(),
 					   .is_leak = false,
-					   .is_withdraw = true,
+					   .type =  1,
 					   .is_ingress = false,
+					   .is_successful = true,
 					   .afi = afi,
 					   .safi = safi,
 					   .peerid = peer->remote_id,

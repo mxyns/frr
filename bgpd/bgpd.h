@@ -382,8 +382,9 @@ LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT
 		{
 			time_t timestamp;
 			bool is_leak;
-			int is_withdraw;
+			int type; // 0 == UPDATE | 1 == WITHDRAW | 2 == BGP DP NO-OP
 			bool is_ingress;
+			bool is_successful;
 			afi_t afi;
 			safi_t safi;
 			struct in_addr peerid;

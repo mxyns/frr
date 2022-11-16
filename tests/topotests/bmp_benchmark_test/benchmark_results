@@ -11,6 +11,9 @@ import numpy as np
 from matplotlib import ticker
 from matplotlib.lines import Line2D
 
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import get_bmp_details_col_data, _get_column_titles, \
+    _get_col_index, _get_column, _get_column_types
+
 ###
 
 # need to ensure change when doing prefix announcements because
@@ -119,48 +122,108 @@ def json_obj_split_series(obj):
     return dict(zip(obj[0].keys(), zip(*[r.values() for r in obj])))
 
 
+def make_bins_from_timeseries(values, nbin=None, binsize=None):
+    if nbin is None and binsize is None:
+        raise ValueError()
+
+    values = np.array(values)
+    bin_size = values.size / nbin
+    indexes = np.arange(0, nbin * int(np.ceil(bin_size))).reshape((nbin, int(np.ceil(bin_size))))
+    binned = np.where(indexes < values.size, np.take(values, indexes, mode="clip"), -1)
+    undefined = np.any(binned < 0, axis=1)
+    binned[undefined] = np.where(binned[undefined],
+                                 np.nan_to_num(np.mean(binned[undefined], where=binned[undefined] >= 0), nan=0),
+                                 binned[undefined])
+
+    return np.array(list(range(nbin))), np.mean(binned, axis=1)
+
+
 def plot_ram_usage(ram_usage):
     print("plotting ram usage")
-    per_process_ram_usage = json_obj_split_series(ram_usage)
-    per_process_ram_usage = per_process_ram_usage | json_obj_split_series(per_process_ram_usage.get("usage"))
-    per_process_ram_usage.pop("usage")
+    per_module_ram_usage = json_obj_split_series(ram_usage)
+    per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
+    per_module_ram_usage.pop("usage")
 
     ax = plt.gca()
-    labels = (np.array(per_process_ram_usage["timestamp"]) - np.min(per_process_ram_usage["timestamp"])) * 1e-6
+    labels = (np.array(per_module_ram_usage["timestamp"]) - np.min(per_module_ram_usage["timestamp"])) * 1e-6
     for idx, (process, mem_use) in enumerate(
-            {k: per_process_ram_usage[k] for k in
-             set(per_process_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
+            {k: per_module_ram_usage[k] for k in
+             set(per_module_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
         ax.plot(labels, np.array(list(map(lambda x: x.get("total"), mem_use))) * 1e-6, label=f"{process} daemon")
     ax.set_ylabel("Memory Usage (MB)")
     ax.legend()
-    plt.suptitle("FRR Daemons RAM Usage Monitoring")
+    plt.suptitle("FRR Modules Memory Usage Monitoring")
     plt.title("{} samples over {} seconds".format(len(labels), np.max(
-        per_process_ram_usage["timestamp"] - np.min(per_process_ram_usage["timestamp"])) * 1e-9))
+        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
     plt.show()
 
-    def _get_lib_usage(entry, lib):
-        return sum(
-            map(lambda x: int(x.split(maxsplit=2)[1][:-1] or '0') * 1000,
-                filter(lambda x: lib in x, entry.get("details"))))
+    bmp_usage = np.array(
+        list(
+            map(
+                lambda x: x.get("total"),
+                per_module_ram_usage["bmp"]
+            )
+        )
+    )
+
+    other_bgpd_usage = np.array(
+        list(
+            map(
+                lambda x: x.get("total"),
+                per_module_ram_usage["bgpd"]
+            )
+        )
+    )
+
+    bins, bmp_values = make_bins_from_timeseries(bmp_usage, nbin=100)
+    bins, bgpd_values = make_bins_from_timeseries(other_bgpd_usage, nbin=100)
+
+    plt.bar(bins, bmp_values, label="bmp module ram usage", color=plt_colors[1])
+    plt.legend()
+    plt.suptitle("FRR BMP RAM Usage Monitoring")
+    plt.title("{} samples over {} seconds".format(len(labels), np.max(
+        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
+    plt.show()
 
     ax = plt.gca()
-    ax.bar(labels,
-           np.array(
-               list(
-                   map(
-                       functools.partial(_get_lib_usage, lib="bgpd_bmp.so"),
-                       per_process_ram_usage["bgpd"]
-                   )
-               )
-           ) * 1e-9,
-           width=10
+    ax.bar(bins,
+           bgpd_values,
+           label="bgpd ram usage"
+           )
+    ax.bar(bins,
+           bmp_values,
+           bottom=bgpd_values,
+           label="bmp module ram usage"
            )
     ax.set_ylabel("BMP Memory Usage (MB)")
     ax.legend()
     plt.suptitle("FRR BMP RAM Usage Monitoring")
     plt.title("{} samples over {} seconds".format(len(labels), np.max(
-        per_process_ram_usage["timestamp"] - np.min(per_process_ram_usage["timestamp"])) * 1e-9))
+        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
     plt.show()
+
+    # bmp usage repartition by memory types
+    def _get_serie_of_column(module_memuse, column):
+        titles = functools.reduce(lambda s1, s2: s1.union(s2),
+                                  [set(_get_column_titles(memuse.get("details")[1:] or [])) for memuse in
+                                   module_memuse])
+        default_vals = {k: 0 for k in titles}
+
+        result = [default_vals | dict(zip(_get_column_titles(detail)[1:],
+                                          list(map(int, _get_column(detail, _get_col_index(column))[1:])))) if len(
+            detail) > 0 else default_vals for detail in
+                  [[] if x == [] else x for x in map(lambda x: x.get("details"), module_memuse)]]
+
+        return titles, result, default_vals
+
+    for column_type in set(_get_column_types().keys()) - {"size"}:
+        _, result, _ = _get_serie_of_column(per_module_ram_usage["bmp"], column_type)
+        for name, values in json_obj_split_series(result).items():
+            plt.plot(values, label=name)
+
+        plt.legend()
+        plt.title(f'BMP Memory Use Repartition across datatypes, criterion="{column_type}"')
+        plt.show()
 
 
 def plot_cpu_usage(logs, matches):
@@ -199,6 +262,14 @@ def plot_cpu_usage(logs, matches):
 plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
 
 
+def type_to_char(entry_type):
+    return {
+        0: "U",
+        1: "W",
+        2: "N"
+    }.get(entry_type)
+
+
 def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=10.):
     print("plotting gantt")
     fig, axs = plt.subplots(len(logs), 1, figsize=(6.4 * fig_scale[0], fig_scale[1] * 4.8))
@@ -208,7 +279,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
         def in_timestamp__duration__out_timestamp():
             return map(lambda t: (
                 t[0].get("prefix"),
-                "{}->{}".format("W" if bool(t[0].get("withdraw")) else "U", "W" if bool(t[1].get("withdraw")) else "U"),
+                "{}->{}".format(type_to_char(t[0].get("type")), type_to_char(t[1].get("type"))),
                 t[0].get("timestamp") * 1e-9,
                 (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9,
                 t[1].get("timestamp") * 1e-9),
@@ -269,6 +340,13 @@ def main():
 
     print("matching events")
     matches = [match_events(vrf_info, vrf_log) for vrf_log in logs]
+    for log in matches:
+        for match in log:
+            if None in match: continue
+            if match[0].get("type") not in [0, 1] and match[1].get("type") not in [0, 1]:
+                print("CAREFUL! NOT ONLY UPDATE AND WITHDRAW")
+            if 0 in [match[0].get("successful"), match[1].get("successful")]:
+                print("CAREFUL! NOT ONLY SUCCESSFUL MESSAGES")
 
     plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
 
@@ -278,7 +356,7 @@ def main():
         def in_timestamp__duration__out_timestamp():
             return map(lambda t: (
                 t[0].get("prefix"),
-                "{}->{}".format("W" if bool(t[0].get("withdraw")) else "U", "W" if bool(t[1].get("withdraw")) else "U"),
+                "{}->{}".format(type_to_char(t[0].get("type")), type_to_char(t[1].get("type"))),
                 t[0].get("timestamp") * 1e-9,
                 (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9,
                 t[1].get("timestamp") * 1e-9,
@@ -288,7 +366,7 @@ def main():
 
         prefix, withdraws, in_timestamp, duration, out_timestamp, leak = zip(*in_timestamp__duration__out_timestamp())
         data = np.array(list(zip(duration, leak)))
-        [np.mean(data[data[:, 1] == x], axis=0) for x in [0, 1]]
+        # [np.mean(data[data[:, 1] == x], axis=0) for x in [0, 1]]
         # => leaking is faster than sending messages => makes sense
 
 
