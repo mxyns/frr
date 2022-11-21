@@ -50,6 +50,16 @@ def _get_column_types():
     }
 
 
+def _get_column_display_name(col_raw_name):
+    return {
+        "max_bytes": "Maximum Size (bytes)",
+        "max_count": "Maximum Count",
+        "total": "Total (bytes)",
+        "size": "SHOULDN'T BE PLOTTED",
+        "current_count": "Current Count"
+    }.get(col_raw_name)
+
+
 def _get_col_index(col):
     return _get_column_types().get(col)
 

@@ -10,6 +10,7 @@ import re
 import sys
 import threading
 import time
+import random
 
 import pytest
 from lib.bgp import verify_bgp_convergence_from_running_config
@@ -330,11 +331,13 @@ def test_prefix_spam(tgen):
             .replace("PREFIXES", "\n".join([f"{'no ' if not yes else ''}network " + prefix for prefix in prefixes]))
         )
 
-    def _send_prefixes(gear, prefixes, n, interval):
+    def _send_prefixes(gear, prefixes, n, interval, pick_random: int = -1):
         __send_prefixes_cmd(gear, prefixes, True)
         time.sleep(interval / 1000)
 
+        this_time_prefixes = prefixes
         for _ in range(n):
+            this_time_prefixes = random.sample(prefixes, k=pick_random) if pick_random > 0 else this_time_prefixes
             __send_prefixes_cmd(gear, prefixes, False)
             time.sleep(interval / 1000)
             __send_prefixes_cmd(gear, prefixes, True)
@@ -342,12 +345,11 @@ def test_prefix_spam(tgen):
 
         __send_prefixes_cmd(gear, prefixes, False)
 
-    def _run_periodic_prefixes(gear, prefixes_path, n, interval):
-        prefixes = set(json.load(open(prefixes_path)).get("prefixes"))
+    def _run_periodic_prefixes(gear, prefixes, n, interval, pick_random=-1):
         logger.info("Loaded prefixes: " + str(prefixes))
         logger.info(f"Repeat interval is {interval}ms")
 
-        thread = threading.Thread(target=_send_prefixes, args=(gear, prefixes, n, interval))
+        thread = threading.Thread(target=_send_prefixes, args=(gear, prefixes, n, interval, pick_random))
 
         return thread
 
@@ -364,10 +366,11 @@ def test_prefix_spam(tgen):
         prefixes = json.load(file).get("prefixes")
         for idx, spammer in enumerate(spammers):
             spammer = (tgen.gears[spammer[0]], spammer[1])
+            prefixes_slice = _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count)
             __send_prefixes_cmd(spammer,
-                                _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count),
+                                prefixes_slice,
                                 True)
-            thread = _run_periodic_prefixes(spammer, ref_file, 10, 1000)
+            thread = _run_periodic_prefixes(spammer, prefixes_slice, 10, 1000, pick_random=100)
             threads.append(thread)
             thread.start()
 

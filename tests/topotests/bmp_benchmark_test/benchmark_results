@@ -3,7 +3,6 @@ import functools
 import glob
 import json
 import os
-import re
 import sys
 
 import matplotlib.pyplot as plt
@@ -11,8 +10,8 @@ import numpy as np
 from matplotlib import ticker
 from matplotlib.lines import Line2D
 
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import get_bmp_details_col_data, _get_column_titles, \
-    _get_col_index, _get_column, _get_column_types
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _get_column_titles, \
+    _get_col_index, _get_column, _get_column_types, _get_column_display_name
 
 ###
 
@@ -138,23 +137,46 @@ def make_bins_from_timeseries(values, nbin=None, binsize=None):
     return np.array(list(range(nbin))), np.mean(binned, axis=1)
 
 
+def format_duration_for_display(duration):
+    return str(np.round(duration, 2))
+
+
+def timestamps_to_duration(timeseries_timestamps):
+    duration_s = np.max(timeseries_timestamps - np.min(timeseries_timestamps)) * 1e-9
+    return duration_s, format_duration_for_display(duration_s)
+
+
+def scale_x_axis_for_duration(x_axis, duration):
+    return x_axis * duration / float(len(x_axis))
+
+
+def make_x_axis_for_timeseries(y_values, duration):
+    return scale_x_axis_for_duration(np.arange(len(y_values)), duration)
+
+
+def make_plot_title(title, sample_count, duration_txt, tyqe):
+    return f"{title}\n{sample_count} samples over {duration_txt} seconds\n{tyqe}"
+
+
 def plot_ram_usage(ram_usage):
     print("plotting ram usage")
     per_module_ram_usage = json_obj_split_series(ram_usage)
     per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
     per_module_ram_usage.pop("usage")
 
+    timestamps = np.array(per_module_ram_usage["timestamp"])
+    exp_duration_s, exp_duration_txt = timestamps_to_duration(timestamps)
+
     ax = plt.gca()
-    labels = (np.array(per_module_ram_usage["timestamp"]) - np.min(per_module_ram_usage["timestamp"])) * 1e-6
+    labels = (np.array(timestamps) - np.min(timestamps)) * 1e-9
     for idx, (process, mem_use) in enumerate(
             {k: per_module_ram_usage[k] for k in
              set(per_module_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
         ax.plot(labels, np.array(list(map(lambda x: x.get("total"), mem_use))) * 1e-6, label=f"{process} daemon")
     ax.set_ylabel("Memory Usage (MB)")
+    ax.set_xlabel("Time (s)")
     ax.legend()
-    plt.suptitle("FRR Modules Memory Usage Monitoring")
-    plt.title("{} samples over {} seconds".format(len(labels), np.max(
-        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
+    plt.title(make_plot_title("FRR Modules Memory Usage Monitoring", len(labels), exp_duration_txt, "Timeseries"))
     plt.show()
 
     bmp_usage = np.array(
@@ -175,31 +197,32 @@ def plot_ram_usage(ram_usage):
         )
     )
 
-    bins, bmp_values = make_bins_from_timeseries(bmp_usage, nbin=100)
-    bins, bgpd_values = make_bins_from_timeseries(other_bgpd_usage, nbin=100)
+    nbin = 100
+    bins, bmp_values = make_bins_from_timeseries(bmp_usage, nbin=nbin)
+    _, bgpd_values = make_bins_from_timeseries(other_bgpd_usage, nbin=nbin)
+    bins = scale_x_axis_for_duration(bins, exp_duration_s)
 
-    plt.bar(bins, bmp_values, label="bmp module ram usage", color=plt_colors[1])
+    plt.bar(bins, bmp_values * 1e-6, label="bmp module ram usage", color=plt_colors[1])
     plt.legend()
-    plt.suptitle("FRR BMP RAM Usage Monitoring")
-    plt.title("{} samples over {} seconds".format(len(labels), np.max(
-        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
+    plt.ylabel("Memory Usage (MB)")
+    plt.xlabel("Time (s)")
+    plt.title(make_plot_title("FRR BMP RAM Usage Monitoring", len(labels), exp_duration_txt, "Timeseries"))
     plt.show()
 
     ax = plt.gca()
     ax.bar(bins,
-           bgpd_values,
+           bgpd_values * 1e-6,
            label="bgpd ram usage"
            )
     ax.bar(bins,
            bmp_values,
-           bottom=bgpd_values,
+           bottom=bgpd_values * 1e-6,
            label="bmp module ram usage"
            )
-    ax.set_ylabel("BMP Memory Usage (MB)")
+    ax.set_ylabel("Memory Usage (MB)")
+    ax.set_xlabel("Time (s)")
     ax.legend()
-    plt.suptitle("FRR BMP RAM Usage Monitoring")
-    plt.title("{} samples over {} seconds".format(len(labels), np.max(
-        per_module_ram_usage["timestamp"] - np.min(per_module_ram_usage["timestamp"])) * 1e-9))
+    plt.title(make_plot_title("FRR BGP+BMP Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
     plt.show()
 
     # bmp usage repartition by memory types
@@ -219,16 +242,20 @@ def plot_ram_usage(ram_usage):
     for column_type in set(_get_column_types().keys()) - {"size"}:
         _, result, _ = _get_serie_of_column(per_module_ram_usage["bmp"], column_type)
         for name, values in json_obj_split_series(result).items():
-            plt.plot(values, label=name)
+            plt.plot(make_x_axis_for_timeseries(values, exp_duration_s), values, label=name)
 
         plt.legend()
-        plt.title(f'BMP Memory Use Repartition across datatypes, criterion="{column_type}"')
+        plt.title(
+            make_plot_title("BMP Memory Use Repartition across datatypes", len(result), exp_duration_txt, "Timeseries"))
+        plt.ylabel(_get_column_display_name(column_type))
+        plt.xlabel("Time (s)")
         plt.show()
 
 
 def plot_cpu_usage(logs, matches):
     print("plotting cpu usage")
-    fig, axs = plt.subplots(len(logs), 1, figsize=(6.4, 2. * 4.8))
+    fig_lineplot, axs_lineplot = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
+    fig_hist, axs_hist = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
     for i, vrf_log in enumerate(logs):
         match = matches[i]
 
@@ -236,30 +263,43 @@ def plot_cpu_usage(logs, matches):
         in_timestamp__duration = lambda: map(lambda t: (
             t[0].get("timestamp") * 1e-9, (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9),
                                              filter(lambda t: None not in t, match))
-        # split timestamps and durations. keep on durations
-        durations = list(zip(*in_timestamp__duration()))[1]
-        ln1 = axs[i].plot(durations, color=plt_colors[0], label='cpu latency (ms)')
-        axs[i].tick_params(axis='y', labelcolor=plt_colors[0])
+        # split timestamps and cpu_delay. keep on cpu_delay
+        cpu_delay = list(zip(*in_timestamp__duration()))[1]
 
-        ax2 = axs[i].twinx()
-        ln2 = ax2.plot(benchmark_logs_get_ram_usage(vrf_log)[:len(durations)], color=plt_colors[1],
+        total_sample_count = len(cpu_delay)
+        total_time_spent = sum(list(in_timestamp__duration())[-1]) - match[0][0].get("timestamp") * 1e-9
+        total_time_spent_txt = format_duration_for_display(total_time_spent)
+
+        ln1 = axs_lineplot[i].plot(make_x_axis_for_timeseries(cpu_delay, total_time_spent), cpu_delay,
+                                   color=plt_colors[0], label='cpu latency (ms)')
+        axs_lineplot[i].tick_params(axis='y', labelcolor=plt_colors[0])
+
+        ax2 = axs_lineplot[i].twinx()
+        logs_ram_usage_values = benchmark_logs_get_ram_usage(vrf_log)[:len(cpu_delay)]
+        ln2 = ax2.plot(make_x_axis_for_timeseries(logs_ram_usage_values, total_time_spent), logs_ram_usage_values,
+                       color=plt_colors[1],
                        label='logs ram usage (bytes)')
         ax2.tick_params(axis='y', labelcolor=plt_colors[1])
 
         lns = ln1 + ln2
-        fig.legend(lns, [ln.get_label() for ln in lns])
+        fig_lineplot.legend(lns, [ln.get_label() for ln in lns], )
 
-        axs[i].set_title("FRR Daemons CPU Usage Monitoring\n{} samples over {} seconds".format(len(durations),
-                                                                                               sum(list(
-                                                                                                   in_timestamp__duration())[
-                                                                                                       -1]) -
-                                                                                               match[0][0].get(
-                                                                                                   "timestamp") * 1e-9))
+        title = f"VRF {i}\nFRR Daemons Update/Withdraw Processing Delay"
+
+        axs_lineplot[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Timeseries"))
+        axs_lineplot[i].set_xlabel("Time (s)")
+        axs_lineplot[i].set_ylabel("Duration (ms)")
+
+        axs_hist[i].hist(np.array(cpu_delay) * 1e3, bins=50)
+        axs_hist[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Histogram"))
+        axs_hist[i].set_ylabel("Count")
+        axs_hist[i].set_xlabel("Duration (ms)")
 
     plt.show()
 
 
 plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+plt.rcParams['figure.constrained_layout.use'] = True
 
 
 def type_to_char(entry_type):
@@ -306,7 +346,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
         # TODO map height to ingress peer_id
 
         legend_elements = [Line2D([], [], label=lbl, color=clr) for lbl, clr in series_settings.items()]
-        plt.legend(handles=legend_elements)
+        plt.legend(handles=legend_elements, )
 
         y = list(map(_get_height_for_prefix, prefix))
         axs[i].hlines(y, in_timestamp, out_timestamp, colors=color_mapper(withdraws), lw=2.5)
@@ -319,7 +359,6 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
         axs[i].set_xlim([0, np.max(out_timestamp)])
         axs[i].yaxis.set_major_formatter(
             ticker.FuncFormatter(_labels_formatter))
-    plt.gcf().tight_layout()
     plt.show()
 
 
@@ -348,9 +387,9 @@ def main():
             if 0 in [match[0].get("successful"), match[1].get("successful")]:
                 print("CAREFUL! NOT ONLY SUCCESSFUL MESSAGES")
 
-    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
-
     plot_cpu_usage(logs, matches)
+
+    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
 
     for match in matches:
         def in_timestamp__duration__out_timestamp():
