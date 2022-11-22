@@ -28,6 +28,10 @@
 /* this file is temporary in nature;  definitions should be moved to the
  * files they're used in */
 
+DEFINE_MGROUP(LML_BENCH, "lmlogs");
+DEFINE_MTYPE(LML_BENCH, LML_BENCH_LOG, "lmlogs benchmark stack log");
+DEFINE_MTYPE(LML_BENCH, LML_BENCH_STACK, "lmlogs benchmark stack block");
+
 DEFINE_MGROUP(BGPD, "bgpd");
 DEFINE_MTYPE(BGPD, BGP, "BGP instance");
 DEFINE_MTYPE(BGPD, BGP_LISTENER, "BGP listen socket details");
@@ -60,8 +64,6 @@ DEFINE_MTYPE(BGPD, BGP_SYNCHRONISE, "BGP synchronise");
 DEFINE_MTYPE(BGPD, BGP_ADJ_IN, "BGP adj in");
 DEFINE_MTYPE(BGPD, BGP_ADJ_OUT, "BGP adj out");
 DEFINE_MTYPE(BGPD, BGP_MPATH_INFO, "BGP multipath info");
-
-DEFINE_MTYPE(BGPD, LML_LOGS, "lmlogs logging stacks");
 
 DEFINE_MTYPE(BGPD, AS_LIST, "BGP AS list");
 DEFINE_MTYPE(BGPD, AS_FILTER, "BGP AS filter");

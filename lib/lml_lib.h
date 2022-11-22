@@ -7,7 +7,9 @@
 
 #include "memory.h"
 
-DECLARE_MTYPE(LML_LOGS);
+DECLARE_MGROUP(LML_BENCH);
+DECLARE_MTYPE(LML_BENCH_STACK);
+DECLARE_MTYPE(LML_BENCH_LOG);
 
 #define LML_COND(bool, ...) LML_COND_##bool(__VA_ARGS__)
 #define LML_COND_0(...)
@@ -64,7 +66,7 @@ DECLARE_MTYPE(LML_LOGS);
                                                                                \
         size_t alloc_size =                                                    \
                 sizeof(struct PREFIX##_stack) + sizeof(TYPE) * stack_cap;      \
-        struct PREFIX##_stack *stack = XCALLOC(MTYPE_LML_LOGS, alloc_size);    \
+        struct PREFIX##_stack *stack = XCALLOC(MTYPE_LML_BENCH_STACK, alloc_size);    \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
         stack->entries = (TYPE *) (stack + 1);                                 \
@@ -81,7 +83,7 @@ DECLARE_MTYPE(LML_LOGS);
         size_t alloc_size = sizeof(struct PREFIX##_log) +                      \
                             sizeof(struct PREFIX##_stack) +                    \
                             sizeof(TYPE) * stack_cap;                          \
-        struct PREFIX##_log *log = XCALLOC(MTYPE_LML_LOGS, alloc_size);        \
+        struct PREFIX##_log *log = XCALLOC(MTYPE_LML_BENCH_LOG, alloc_size);        \
         struct PREFIX##_stack *stack = (struct PREFIX##_stack *) (log + 1);    \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
@@ -153,10 +155,10 @@ DECLARE_MTYPE(LML_LOGS);
         while (stack != NULL) {                                                \
             to_free = stack;                                                   \
             stack = stack->next;                                               \
-            XFREE(MTYPE_LML_LOGS, to_free);                                    \
+            XFREE(MTYPE_LML_BENCH_LOG, to_free);                                    \
         }                                                                      \
                                                                                \
-        XFREE(MTYPE_LML_LOGS, log);                                            \
+        XFREE(MTYPE_LML_BENCH_STACK, log);                                            \
     }                                                                          \
                                                                                \
     LML_COND(                                                                  \

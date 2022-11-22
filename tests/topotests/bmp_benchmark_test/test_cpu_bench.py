@@ -6,19 +6,18 @@
 import glob
 import json
 import os
+import random
 import re
 import sys
 import threading
 import time
-import random
 
 import pytest
 from lib.bgp import verify_bgp_convergence_from_running_config
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
 
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _split_bgp_log, get_bgp_bmp_total_sum, \
-    get_lmlogs_total
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import get_modules_total_and_logs
 from tests.topotests.lib.common_config import run_frr_cmd
 
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -288,24 +287,20 @@ def get_pids(router: TopoRouter):
 
 
 def get_router_ram_usages(rnode):
-
-    ram_usages = dict()
-
     try:
         o = rnode.vtysh_cmd("show memory bgpd")
-        (bgp_total, bgp_details), (bmp_total, bmp_details) = get_bgp_bmp_total_sum(o)
-        lmlogs_total, lmlogs_details = get_lmlogs_total(bgp_details)
-
-        ram_usages["bgpd"] = {"total": bgp_total, "details": bgp_details}
-        ram_usages["bmp"] = {"total": bmp_total, "details": bmp_details}
-        ram_usages["lmlogs"] = {"total": lmlogs_total, "details": lmlogs_details}
+        per_module_memuses = get_modules_total_and_logs(o)
+        return {module: {"total": module_total, "details": full_logs} for module, (module_total, full_logs) in
+                per_module_memuses.items()}
     except Exception as e:
-        ram_usages["bmp"] = {}
-        ram_usages["bgpd"] = {}
-        ram_usages["lmlogs"] = {}
         logger.info(f"ERROR", e)
-
-    return ram_usages
+        return {
+            "bmp": {},
+            "bgpd": {},
+            "lmlogs": {},
+            "logging": {},
+            "libfrr": {}
+        }
 
 
 def test_query_ram_usage(tgen):

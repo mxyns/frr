@@ -1,5 +1,24 @@
 import re
 
+qmem_module_name_regex = re.compile("--- qmem (.+) ---")
+
+
+def _split_show_memory_bgpd_log(output):
+    per_module_memusage = dict()
+    lines = output.split("\n")
+    curr_module = None
+    for i, line in enumerate(lines):
+        regmatches = qmem_module_name_regex.search(line)
+        if regmatches is not None:
+            curr_module = regmatches.groups()[0].split(" ")[0].lower()
+            per_module_memusage[curr_module] = list()
+            continue
+
+        if curr_module is not None:
+            per_module_memusage[curr_module].append(line)
+
+    return {k: _cleanup_lines(v) for k, v in per_module_memusage.items()}
+
 
 def _split_bgp_log(output):
     bgpd_only = list()
@@ -32,17 +51,9 @@ def _get_total_sum(col, avoid=None):
     return sum(map(lambda x: 0 if x in avoid else int(x), col))
 
 
-def get_bgp_bmp_total_sum(output):
-    bgpd_only, bmp_only = _split_bgp_log(output)
-    bmp_totals = _get_column(bmp_only, -3)
-    bgp_totals = _get_column(bgpd_only, -3)
-
-    return (_get_total_sum(bgp_totals), bgpd_only), (_get_total_sum(bmp_totals), bmp_only)
-
-
-def get_lmlogs_total(output):
-    return _get_details_col_data(output, "lmlogs logging stacks", "total"), []
-
+def get_modules_total_and_logs(output):
+    per_module_memusage_logs = _split_show_memory_bgpd_log(output)
+    return {module: (_get_total_sum(_get_column(module_memusage_logs, _get_col_index("total"))), module_memusage_logs) for module, module_memusage_logs in per_module_memusage_logs.items()}
 
 def _get_column_types():
     return {
