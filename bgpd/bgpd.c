@@ -101,7 +101,7 @@ DEFINE_QOBJ_TYPE(bgp);
 DEFINE_QOBJ_TYPE(peer);
 DEFINE_HOOK(bgp_inst_delete, (struct bgp *bgp), (bgp));
 
-LML_DEFINE_FUNCS(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT, LML_NO_OPT);
+LML_DEFINE_FUNCS(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_NO_OPT, LML_NO_OPT);
 
 /* BGP process wide configuration.  */
 static struct bgp_master bgp_master;

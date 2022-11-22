@@ -1,6 +1,7 @@
 #!/bin/python3
 import functools
 import glob
+import itertools
 import json
 import os
 import sys
@@ -78,7 +79,7 @@ def match_events(vrf_info, vrf_log_json):
         return next(filter(
             lambda event: event.get("timestamp") >= trig_event.get("timestamp")
                           and event.get("prefix") == trig_event.get("prefix")
-                          # after a non leak update/withdraw we expect
+                          #     after a non leak update/withdraw we expect
                           #     either a leak to another vrf
                           #     or an outgoing update/withdraw for the same afi:safi
                           and (_is_leak(event) or
@@ -108,11 +109,11 @@ def match_events(vrf_info, vrf_log_json):
                          )) for ingress_x in ingress]
 
 
-# take {timestamp:number, events:[]}
+# take [{"total": int, "details": []}]
 # get every mem_usage field in each event
 # return list of mem_usage values (memory usage of logging system)
-def benchmark_logs_get_ram_usage(vrf_log_json):
-    return list(map(lambda ev: ev.get("mem_usage"), vrf_log_json.get("events")))
+def benchmark_logs_get_ram_usage(lmlogs_module_ram_usage):
+    return list(map(_get_total_from_dict, lmlogs_module_ram_usage["lmlogs"]))
 
 
 # take list [{},{},{}] with n fields in each list member
@@ -158,11 +159,22 @@ def make_plot_title(title, sample_count, duration_txt, tyqe):
     return f"{title}\n{sample_count} samples over {duration_txt} seconds\n{tyqe}"
 
 
-def plot_ram_usage(ram_usage):
+def plot_data_stats(axis, data, data_label=None, mean=False, median=False):
+    if mean: axis.axhline(y=np.nanmean(data), color=plt_colors[len(axis.lines)],
+                          label=f"mean of {data_label}" if data_label is not None else None)
+    if median: axis.axhline(y=np.nanmedian(data), color=plt_colors[len(axis.lines)],
+                            label=f"median of {data_label}" if data_label is not None else None)
+
+
+def sync_timeseries(reference, series_list):
+    return np.array([np.interp(reference, series[:, 0], series[:, 1]) for series in series_list])
+
+
+_get_total_from_dict = functools.partial(lambda key, dic: dic[key], "total")
+
+
+def plot_ram_usage(per_module_ram_usage):
     print("plotting ram usage")
-    per_module_ram_usage = json_obj_split_series(ram_usage)
-    per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
-    per_module_ram_usage.pop("usage")
 
     timestamps = np.array(per_module_ram_usage["timestamp"])
     exp_duration_s, exp_duration_txt = timestamps_to_duration(timestamps)
@@ -172,7 +184,7 @@ def plot_ram_usage(ram_usage):
     for idx, (process, mem_use) in enumerate(
             {k: per_module_ram_usage[k] for k in
              set(per_module_ram_usage.keys()) - {"timestamp", "staticd", "zebra"}}.items()):
-        ax.plot(labels, np.array(list(map(lambda x: x.get("total"), mem_use))) * 1e-6, label=f"{process} daemon")
+        ax.plot(labels, np.array(list(map(_get_total_from_dict, mem_use))) * 1e-6, label=f"{process} daemon")
     ax.set_ylabel("Memory Usage (MB)")
     ax.set_xlabel("Time (s)")
     ax.legend()
@@ -197,9 +209,19 @@ def plot_ram_usage(ram_usage):
         )
     )
 
+    # per_vrf_logmem_usage
+    # [
+    #     [ [timestamp1, mem_usage1], [timestamp2, mem_usage2], ... ] for vrf i
+    #     [...] for vrf i + 1
+    # ]
+
+    logmem_usage_sum = benchmark_logs_get_ram_usage(per_module_ram_usage)
+    other_bgpd_usage_clean = other_bgpd_usage - logmem_usage_sum
+
     nbin = 100
     bins, bmp_values = make_bins_from_timeseries(bmp_usage, nbin=nbin)
-    _, bgpd_values = make_bins_from_timeseries(other_bgpd_usage, nbin=nbin)
+    _, bgpd_clean_values = make_bins_from_timeseries(other_bgpd_usage_clean, nbin=nbin)
+    _, logmem_values = make_bins_from_timeseries(logmem_usage_sum, nbin=nbin)
     bins = scale_x_axis_for_duration(bins, exp_duration_s)
 
     plt.bar(bins, bmp_values * 1e-6, label="bmp module ram usage", color=plt_colors[1])
@@ -210,14 +232,39 @@ def plot_ram_usage(ram_usage):
     plt.show()
 
     ax = plt.gca()
+    unit_scale = 1e-6
+    bmp_values_scaled = bmp_values * unit_scale
+    logmem_values = logmem_values * unit_scale
+    bgpd_clean_values_scaled = bgpd_clean_values * unit_scale
     ax.bar(bins,
-           bgpd_values * 1e-6,
-           label="bgpd ram usage"
+           logmem_values,
+           label="lmlogs"
            )
     ax.bar(bins,
-           bmp_values,
-           bottom=bgpd_values * 1e-6,
-           label="bmp module ram usage"
+           bgpd_clean_values_scaled,
+           bottom=logmem_values,
+           label="bgpd"
+           )
+    ax.bar(bins,
+           bmp_values_scaled,
+           bottom=bgpd_clean_values_scaled + logmem_values,
+           label="bmp module"
+           )
+    ax.set_ylabel("Memory Usage (MB)")
+    ax.set_xlabel("Time (s)")
+    ax.legend()
+    plt.title(make_plot_title("FRR BGP+BMP+lmlogs Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
+    plt.show()
+
+    ax = plt.gca()
+    ax.bar(bins,
+           bgpd_clean_values_scaled,
+           label="bgpd"
+           )
+    ax.bar(bins,
+           bmp_values_scaled,
+           bottom=bgpd_clean_values_scaled,
+           label="bmp module"
            )
     ax.set_ylabel("Memory Usage (MB)")
     ax.set_xlabel("Time (s)")
@@ -252,9 +299,10 @@ def plot_ram_usage(ram_usage):
         plt.show()
 
 
-def plot_cpu_usage(logs, matches):
+def plot_cpu_usage(per_module_ram_usage, logs, matches):
     print("plotting cpu usage")
-    fig_lineplot, axs_lineplot = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
+    fig_cpu_lineplot, axs_cpu_lineplot = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
+    fig_logmem_lineplot, axs_logmem_lineplot = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
     fig_hist, axs_hist = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
     for i, vrf_log in enumerate(logs):
         match = matches[i]
@@ -270,30 +318,40 @@ def plot_cpu_usage(logs, matches):
         total_time_spent = sum(list(in_timestamp__duration())[-1]) - match[0][0].get("timestamp") * 1e-9
         total_time_spent_txt = format_duration_for_display(total_time_spent)
 
-        ln1 = axs_lineplot[i].plot(make_x_axis_for_timeseries(cpu_delay, total_time_spent), cpu_delay,
-                                   color=plt_colors[0], label='cpu latency (ms)')
-        axs_lineplot[i].tick_params(axis='y', labelcolor=plt_colors[0])
+        axs_cpu_lineplot[i].plot(make_x_axis_for_timeseries(cpu_delay, total_time_spent), cpu_delay,
+                                 color=plt_colors[0], label='cpu latency (ms)')
+        plot_data_stats(axs_cpu_lineplot[i], cpu_delay, data_label="cpu latency (ms)", mean=True,
+                        median=True)
 
-        ax2 = axs_lineplot[i].twinx()
-        logs_ram_usage_values = benchmark_logs_get_ram_usage(vrf_log)[:len(cpu_delay)]
-        ln2 = ax2.plot(make_x_axis_for_timeseries(logs_ram_usage_values, total_time_spent), logs_ram_usage_values,
-                       color=plt_colors[1],
-                       label='logs ram usage (bytes)')
-        ax2.tick_params(axis='y', labelcolor=plt_colors[1])
+        # plot logging system ram usage
+        logs_ram_usage_values = benchmark_logs_get_ram_usage(per_module_ram_usage)[:len(cpu_delay)]
+        axs_logmem_lineplot[i].plot(make_x_axis_for_timeseries(logs_ram_usage_values, total_time_spent),
+                                    logs_ram_usage_values,
+                                    color=plt_colors[0],
+                                    label='logs ram usage (bytes)')
+        plot_data_stats(axs_logmem_lineplot[i], logs_ram_usage_values, data_label="logs ram usage (bytes)", mean=True,
+                        median=True)
 
-        lns = ln1 + ln2
-        fig_lineplot.legend(lns, [ln.get_label() for ln in lns], )
-
+        # titles & styling
         title = f"VRF {i}\nFRR Daemons Update/Withdraw Processing Delay"
+        axs_cpu_lineplot[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Timeseries"))
+        axs_cpu_lineplot[i].set_xlabel("Time (s)")
+        axs_cpu_lineplot[i].set_ylabel("Duration (ms)")
+        axs_cpu_lineplot[i].legend()
 
-        axs_lineplot[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Timeseries"))
-        axs_lineplot[i].set_xlabel("Time (s)")
-        axs_lineplot[i].set_ylabel("Duration (ms)")
+        axs_logmem_lineplot[i].set_title(
+            make_plot_title(f"VRF {i}\n FRR Benchmark Logging System Memory Usage", len(logs_ram_usage_values),
+                            total_time_spent_txt, "Timeseries"))
+        axs_logmem_lineplot[i].set_xlabel("Time (s)")
+        axs_logmem_lineplot[i].set_ylabel("Memory usage (bytes)")
+        axs_logmem_lineplot[i].legend()
 
-        axs_hist[i].hist(np.array(cpu_delay) * 1e3, bins=50)
+        # cpu delay histogram
+        axs_hist[i].hist(np.array(cpu_delay) * 1e3, bins=50, label="cpu delay (ms)")
         axs_hist[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Histogram"))
         axs_hist[i].set_ylabel("Count")
         axs_hist[i].set_xlabel("Duration (ms)")
+        axs_hist[i].legend()
 
     plt.show()
 
@@ -367,15 +425,23 @@ def load_vrf_info(logs):
 
 
 def main():
-    # TODO add prefix ticks
     logs, ram_usage = load_files_from_router("uut")
+
+    if len(ram_usage) > 0:
+        per_module_ram_usage = json_obj_split_series(ram_usage)
+        per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
+        per_module_ram_usage.pop("usage")
+    else:
+        dummy = {"total": -69, "details": []}
+        per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
+
     for log in logs:
         pass  # log["events"] = list(filter(lambda x: not bool(x.get("leak")), log["events"]))
 
     vrf_info = load_vrf_info(logs)
     print("vrf infos: \n", vrf_info)
 
-    plot_ram_usage(ram_usage)
+    plot_ram_usage(per_module_ram_usage)
 
     print("matching events")
     matches = [match_events(vrf_info, vrf_log) for vrf_log in logs]
@@ -387,7 +453,7 @@ def main():
             if 0 in [match[0].get("successful"), match[1].get("successful")]:
                 print("CAREFUL! NOT ONLY SUCCESSFUL MESSAGES")
 
-    plot_cpu_usage(logs, matches)
+    plot_cpu_usage(per_module_ram_usage, logs, matches)
 
     plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
 

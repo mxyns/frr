@@ -376,8 +376,8 @@ struct bgp_srv6_function {
 #include "lml_lib.h"
 
 time_t lml_time(void);
-LML_DECLARE_ALL(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT, LML_NO_OPT);
-LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_RECORD_MEMSIZE_OPT,
+LML_DECLARE_ALL(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_NO_OPT, LML_NO_OPT);
+LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_NO_OPT,
 		LML_NO_OPT,
 		{
 			time_t timestamp;

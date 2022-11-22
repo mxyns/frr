@@ -221,9 +221,8 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 	static char line[512];
 	memset(line, 0, 512);
 
-	ssize_t written = snprintfrr(line, 512, "{"
+	snprintfrr(line, 512, "{"
 				     "\"timestamp\": %lu, "
-				     "\"mem_usage\": %lu, "
 				     "\"leak\": %d, "
 				     "\"ingress\": %d, "
 				     "\"type\": %d, "
@@ -233,7 +232,6 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     "\"prefix\": \"%pFX\", "
 				     "\"rd\": \"%s\"}",
 				     entry->timestamp,
-				     log->alloc_size,
 				     entry->is_leak,
 				     entry->is_ingress,
 				     entry->type,
@@ -243,7 +241,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     &entry->prefix,
 				     prd_str
 	);
-	int file_written = fprintf(file, "%s,\n", line);
+	fprintf(file, "%s,\n", line);
 }
 
 static void bgp_dump_benchlog(struct bgp *bgp) {

@@ -5,6 +5,10 @@
 #ifndef LMLOGS_LML_LIB_H
 #define LMLOGS_LML_LIB_H
 
+#include "memory.h"
+
+DECLARE_MTYPE(LML_LOGS);
+
 #define LML_COND(bool, ...) LML_COND_##bool(__VA_ARGS__)
 #define LML_COND_0(...)
 #define LML_COND_1(...) __VA_ARGS__
@@ -60,7 +64,7 @@
                                                                                \
         size_t alloc_size =                                                    \
                 sizeof(struct PREFIX##_stack) + sizeof(TYPE) * stack_cap;      \
-        struct PREFIX##_stack *stack = malloc(alloc_size);                     \
+        struct PREFIX##_stack *stack = XCALLOC(MTYPE_LML_LOGS, alloc_size);    \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
         stack->entries = (TYPE *) (stack + 1);                                 \
@@ -77,7 +81,7 @@
         size_t alloc_size = sizeof(struct PREFIX##_log) +                      \
                             sizeof(struct PREFIX##_stack) +                    \
                             sizeof(TYPE) * stack_cap;                          \
-        struct PREFIX##_log *log = malloc(alloc_size);                         \
+        struct PREFIX##_log *log = XCALLOC(MTYPE_LML_LOGS, alloc_size);        \
         struct PREFIX##_stack *stack = (struct PREFIX##_stack *) (log + 1);    \
         stack->stack_cap = stack_cap;                                          \
         stack->stack_size = 0;                                                 \
@@ -149,10 +153,10 @@
         while (stack != NULL) {                                                \
             to_free = stack;                                                   \
             stack = stack->next;                                               \
-            free(to_free);                                                     \
+            XFREE(MTYPE_LML_LOGS, to_free);                                    \
         }                                                                      \
                                                                                \
-        free(log);                                                             \
+        XFREE(MTYPE_LML_LOGS, log);                                            \
     }                                                                          \
                                                                                \
     LML_COND(                                                                  \

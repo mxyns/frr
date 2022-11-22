@@ -17,7 +17,8 @@ from lib.bgp import verify_bgp_convergence_from_running_config
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
 
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _split_bgp_log, get_bgp_bmp_total_sum
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _split_bgp_log, get_bgp_bmp_total_sum, \
+    get_lmlogs_total
 from tests.topotests.lib.common_config import run_frr_cmd
 
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -118,7 +119,7 @@ def tgen(request):
         filepath = "{}/{}/benchmark/ram_usage".format(CWD, rnode.name)
         [os.remove(x) for x in glob.glob(os.path.join(os.path.dirname(filepath), "ram_usage*"))]
         with open(filepath, "w") as f:
-            print("writing to {}".format(filepath))
+            logger.info("writing to {}".format(filepath))
             # fill with 0 values where we're missing some data
             for ram_usage in ram_usages:
                 ram_usage["usage"] = {
@@ -138,7 +139,7 @@ def tgen(request):
     for rname, router in router_list.items():
         router.load_config(TopoRouter.RD_ZEBRA, "zebra.conf")
         router.load_config(TopoRouter.RD_BGP, "bgpd.conf", "-M bmp --log-level debugging")
-        print(type(router), dir(type(router)))
+        logger.info(f"{type(router)}, {dir(type(router))}")
         setup_router_vrf(router)
 
     # Start and configure the router daemons
@@ -152,8 +153,8 @@ def tgen(request):
 
     time.sleep(5)
 
-    print("exporting logs")
-    export_benchmark_logs(tgen, rnames=["uut"])
+    logger.info("exporting logs")
+    export_benchmark_logs(tgen, rnames=list(tgen.gears.keys()))
 
     # Teardown after last test runs
     tgen.stop_topology()
@@ -178,11 +179,11 @@ def get_router_ids(tgen):
     def _get_router_ids(rnode):
         show_bgp_json = json.loads(run_frr_cmd(rnode, "show bgp vrfs json") or "{\"vrfs\":{}}").get("vrfs") or dict(
             {"vrfs": {}})
-        print(show_bgp_json)
+        logger.info(show_bgp_json)
 
         router_id_out = dict()
         for vrf_name, vrf_obj in show_bgp_json.items():
-            print("{} = {}".format(vrf_name, vrf_obj.get("routerId")))
+            logger.info("{} = {}".format(vrf_name, vrf_obj.get("routerId")))
             router_id_out[vrf_name] = vrf_obj.get("routerId")
 
         return router_id_out if bool(router_id_out) else get_router_id(rnode)
@@ -280,26 +281,29 @@ def get_pids(router: TopoRouter):
 
     pid_files = pid_files.split("\n")
     logger.info("PID FILES " + str(pid_files))
-    print("PID FILES " + str(pid_files))
+    logger.info("PID FILES " + str(pid_files))
 
     return {pid_file.split("/")[-1].split(".pid")[0]: pid_file for pid_file in pid_files if
             pid_file.startswith("/") and pid_file.endswith(".pid")}
 
 
 def get_router_ram_usages(rnode):
-    # pid_files = get_pids(rnode)
-    # logger.info("pidFiles = " + str(pid_files))
 
     ram_usages = dict()
 
     try:
         o = rnode.vtysh_cmd("show memory bgpd")
         (bgp_total, bgp_details), (bmp_total, bmp_details) = get_bgp_bmp_total_sum(o)
+        lmlogs_total, lmlogs_details = get_lmlogs_total(bgp_details)
+
         ram_usages["bgpd"] = {"total": bgp_total, "details": bgp_details}
         ram_usages["bmp"] = {"total": bmp_total, "details": bmp_details}
+        ram_usages["lmlogs"] = {"total": lmlogs_total, "details": lmlogs_details}
     except Exception as e:
         ram_usages["bmp"] = {}
         ram_usages["bgpd"] = {}
+        ram_usages["lmlogs"] = {}
+        logger.info(f"ERROR", e)
 
     return ram_usages
 
@@ -313,7 +317,7 @@ def test_query_ram_usage(tgen):
         pass
 
     ram_usages = get_router_ram_usages(uut)
-    print("ram usages : " + str(ram_usages))
+    logger.info("ram usages : " + str(ram_usages))
 
 
 def test_prefix_spam(tgen):
@@ -336,6 +340,7 @@ def test_prefix_spam(tgen):
         time.sleep(interval / 1000)
 
         this_time_prefixes = prefixes
+        pick_random = min(max(0, pick_random), len(prefixes))
         for _ in range(n):
             this_time_prefixes = random.sample(prefixes, k=pick_random) if pick_random > 0 else this_time_prefixes
             __send_prefixes_cmd(gear, prefixes, False)
@@ -354,7 +359,7 @@ def test_prefix_spam(tgen):
         return thread
 
     def _norm_slice(arr, start_perc, end_perc):
-        print(f"slicing from {start_perc * 100.0}% to {end_perc * 100.0}%")
+        logger.info(f"slicing from {start_perc * 100.0}% to {end_perc * 100.0}%")
         return arr[int(start_perc * len(arr)):int(end_perc * len(arr))]
 
     ref_file = "{}/{}".format(CWD, prefix_file)
@@ -367,16 +372,14 @@ def test_prefix_spam(tgen):
         for idx, spammer in enumerate(spammers):
             spammer = (tgen.gears[spammer[0]], spammer[1])
             prefixes_slice = _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count)
-            __send_prefixes_cmd(spammer,
-                                prefixes_slice,
-                                True)
             thread = _run_periodic_prefixes(spammer, prefixes_slice, 10, 1000, pick_random=100)
             threads.append(thread)
             thread.start()
 
     while True in [thread.is_alive() for thread in threads]:
-        time.sleep(1)
+        time.sleep(.5)
         uut.vtysh_cmd("do show bmp")
+        uut.vtysh_cmd("do show bgp all")
 
     [thread.join() for thread in threads]
 
@@ -384,17 +387,17 @@ def test_prefix_spam(tgen):
 def export_benchmark_logs(tgen, rnames=None, routers=None):
     def _export_file(router, file_from, file_to):
         content = router.cmd_raises(f"cat {file_from}")
-        # print(content)
+        # logger.info(content)
         dir_to = os.path.dirname(file_to)
         os.makedirs(dir_to, exist_ok=True)
 
         with open(file_to, "w") as f:
-            print("opened " + file_to)
+            logger.info("opened " + file_to)
             f.write(content)
 
     def _list_files(router, ls_dir):
         content = router.cmd(f"ls {ls_dir} -1 --color=never ")
-        print(f"benchmark files :\n {content}")
+        logger.info(f"benchmark files :\n {content}")
         return content.split("\n")
 
     def _export_files(router, logdir, prefix):

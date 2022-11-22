@@ -40,6 +40,10 @@ def get_bgp_bmp_total_sum(output):
     return (_get_total_sum(bgp_totals), bgpd_only), (_get_total_sum(bmp_totals), bmp_only)
 
 
+def get_lmlogs_total(output):
+    return _get_details_col_data(output, "lmlogs logging stacks", "total"), []
+
+
 def _get_column_types():
     return {
         "max_bytes": -1,
@@ -48,6 +52,10 @@ def _get_column_types():
         "size": -4,
         "current_count": -5
     }
+
+
+def _get_col_index(col):
+    return _get_column_types().get(col)
 
 
 def _get_column_display_name(col_raw_name):
@@ -60,14 +68,8 @@ def _get_column_display_name(col_raw_name):
     }.get(col_raw_name)
 
 
-def _get_col_index(col):
-    return _get_column_types().get(col)
-
-
-def get_bmp_details_col_data(details, line, col):
+def _get_details_col_data(details, line, col):
     col = _get_col_index(col)
 
     nxt = next(filter(lambda x: line in x, details), None)
-    if nxt is not None:
-        print(_get_column_titles([nxt]))
     return 0 if nxt is None else int(_get_column([nxt], col)[0])
