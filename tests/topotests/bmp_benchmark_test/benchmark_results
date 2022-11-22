@@ -1,18 +1,19 @@
 #!/bin/python3
 import functools
 import glob
-import itertools
 import json
+import operator
 import os
 import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import ticker
+from matplotlib import ticker, scale
 from matplotlib.lines import Line2D
 
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _get_column_titles, \
-    _get_col_index, _get_column, _get_column_types, _get_column_display_name
+from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _get_column_types, _get_column_display_name, \
+    get_modules_datatypes_and_sizes, \
+    _get_series_of_column
 
 ###
 
@@ -283,9 +284,9 @@ def plot_ram_usage(per_module_ram_usage):
     logs_ram_usage_values = benchmark_logs_get_ram_usage(per_module_ram_usage)
     fig_logmem_lineplot, axs_logmem_lineplot = plt.gcf(), plt.gca()
     axs_logmem_lineplot.plot(make_x_axis_for_timeseries(logs_ram_usage_values, exp_duration_s),
-                                logs_ram_usage_values,
-                                color=plt_colors[0],
-                                label='logs ram usage (bytes)')
+                             logs_ram_usage_values,
+                             color=plt_colors[0],
+                             label='logs ram usage (bytes)')
     plot_data_stats(axs_logmem_lineplot, logs_ram_usage_values, data_label="logs ram usage (bytes)", mean=True,
                     median=True)
 
@@ -298,21 +299,8 @@ def plot_ram_usage(per_module_ram_usage):
     fig_logmem_lineplot.show()
 
     # bmp usage repartition by memory types
-    def _get_serie_of_column(module_memuse, column):
-        titles = functools.reduce(lambda s1, s2: s1.union(s2),
-                                  [set(_get_column_titles(memuse.get("details")[1:] or [])) for memuse in
-                                   module_memuse])
-        default_vals = {k: 0 for k in titles}
-
-        result = [default_vals | dict(zip(_get_column_titles(detail)[1:],
-                                          list(map(int, _get_column(detail, _get_col_index(column))[1:])))) if len(
-            detail) > 0 else default_vals for detail in
-                  [[] if x == [] else x for x in map(lambda x: x.get("details"), module_memuse)]]
-
-        return titles, result, default_vals
-
-    for column_type in set(_get_column_types().keys()) - {"size"}:
-        _, result, _ = _get_serie_of_column(per_module_ram_usage["bmp"], column_type)
+    for column_type in set(_get_column_types().keys()) - {"size", 'title'}:
+        _, result, _ = _get_series_of_column(per_module_ram_usage["bmp"], column_type)
         for name, values in json_obj_split_series(result).items():
             plt.plot(make_x_axis_for_timeseries(values, exp_duration_s), values, label=name)
 
@@ -322,6 +310,23 @@ def plot_ram_usage(per_module_ram_usage):
         plt.ylabel(_get_column_display_name(column_type))
         plt.xlabel("Time (s)")
         plt.show()
+
+    modules_types_sizes = get_modules_datatypes_and_sizes(
+        {k: v for k, v in per_module_ram_usage.items() if k not in ["timestamp"]})
+    modules_types_sizes = {module: set(functools.reduce(operator.iconcat, values, [])) for module, values in
+                           modules_types_sizes.items()}
+    subplots_count = len(modules_types_sizes.keys())
+    fig, axs = plt.subplots(1, subplots_count, figsize=(6.4 * subplots_count, 4.8 * 1.5))
+    for i, (ax, (module, data)) in enumerate(zip(axs, modules_types_sizes.items())):
+        data = [(name, int(size_str) if size_str.isnumeric() else 0) for (name, size_str) in data]
+        data = list(zip(*sorted(data, reverse=True, key=lambda tup: tup[1])))
+        ax.barh(data[0], data[1], label="datatypes size")
+        ax.set_xscale(scale.LogScale(ax, base=2))
+        ax.set_title(f"{module} datatypes sizes")
+        ax.set_ylabel("Size (bytes)")
+        ax.set_xlabel("Datatype")
+        ax.legend()
+    plt.show()
 
 
 def plot_cpu_usage(per_module_ram_usage, logs, matches):
@@ -348,7 +353,7 @@ def plot_cpu_usage(per_module_ram_usage, logs, matches):
                         median=True)
 
         # titles & styling
-        title = f"VRF {i}\nFRR Daemons Update/Withdraw Processing Delay"
+        title = f"VRF {vrf_log['vrf']} {vrf_log['vrf_name']}\nFRR Daemons Update/Withdraw Processing Delay"
         axs_cpu_lineplot[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Timeseries"))
         axs_cpu_lineplot[i].set_xlabel("Time (s)")
         axs_cpu_lineplot[i].set_ylabel("Duration (ms)")

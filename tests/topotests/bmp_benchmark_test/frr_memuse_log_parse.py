@@ -1,3 +1,4 @@
+import functools
 import re
 
 qmem_module_name_regex = re.compile("--- qmem (.+) ---")
@@ -20,19 +21,6 @@ def _split_show_memory_bgpd_log(output):
     return {k: _cleanup_lines(v) for k, v in per_module_memusage.items()}
 
 
-def _split_bgp_log(output):
-    bgpd_only = list()
-    bmp_only = list()
-    lines = output.split("\n")
-    for i, line in enumerate(lines):
-        if "qmem BMP" in line:
-            bgpd_only = lines[13:i]
-            bmp_only = lines[i + 1:]
-            break
-
-    return _cleanup_lines(bgpd_only), _cleanup_lines(bmp_only)
-
-
 def _cleanup_lines(lines):
     return [line.strip() for line in lines if not line.startswith("---") and len(line) > 0]
 
@@ -42,7 +30,7 @@ def _get_column(tab, col):
 
 
 def _get_column_titles(tab):
-    return [" ".join(re.split("\\s+", line)[:-6] or ['', '']) for line in tab]
+    return [" ".join(re.split("\\s+", line)[:_get_col_index("title") + 1] or ['', '']).strip() for line in tab]
 
 
 def _get_total_sum(col, avoid=None):
@@ -53,7 +41,30 @@ def _get_total_sum(col, avoid=None):
 
 def get_modules_total_and_logs(output):
     per_module_memusage_logs = _split_show_memory_bgpd_log(output)
-    return {module: (_get_total_sum(_get_column(module_memusage_logs, _get_col_index("total"))), module_memusage_logs) for module, module_memusage_logs in per_module_memusage_logs.items()}
+    return {module: {"total": _get_total_sum(_get_column(module_memusage_logs, _get_col_index("total"))),
+                     "details": module_memusage_logs} for module, module_memusage_logs in
+            per_module_memusage_logs.items()}
+
+
+def get_modules_datatypes_and_sizes(per_module_memusage):
+    return {module: [list(zip(_get_column_titles(values['details']),
+                             _get_column(values['details'], _get_col_index("size")))) for values in series] for module, series in
+            per_module_memusage.items()}
+
+
+def _get_series_of_column(module_memuse, column):
+    titles = functools.reduce(lambda s1, s2: s1.union(s2),
+                              [set(_get_column_titles(memuse.get("details")[1:] or [])) for memuse in
+                               module_memuse])
+    default_vals = {k: 0 for k in titles}
+
+    result = [default_vals | dict(zip(_get_column_titles(detail)[1:],
+                                      list(map(int, _get_column(detail, _get_col_index(column))[1:])))) if len(
+        detail) > 0 else default_vals for detail in
+              [[] if x == [] else x for x in map(lambda x: x.get("details"), module_memuse)]]
+
+    return titles, result, default_vals
+
 
 def _get_column_types():
     return {
@@ -61,7 +72,8 @@ def _get_column_types():
         "max_count": -2,
         "total": -3,
         "size": -4,
-        "current_count": -5
+        "current_count": -5,
+        "title": -7
     }
 
 
@@ -74,8 +86,9 @@ def _get_column_display_name(col_raw_name):
         "max_bytes": "Maximum Size (bytes)",
         "max_count": "Maximum Count",
         "total": "Total (bytes)",
-        "size": "SHOULDN'T BE PLOTTED",
-        "current_count": "Current Count"
+        "size": "Size (bytes)",
+        "current_count": "Current Count",
+        "title": "Datatype"
     }.get(col_raw_name)
 
 

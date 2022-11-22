@@ -289,9 +289,7 @@ def get_pids(router: TopoRouter):
 def get_router_ram_usages(rnode):
     try:
         o = rnode.vtysh_cmd("show memory bgpd")
-        per_module_memuses = get_modules_total_and_logs(o)
-        return {module: {"total": module_total, "details": full_logs} for module, (module_total, full_logs) in
-                per_module_memuses.items()}
+        return get_modules_total_and_logs(o)
     except Exception as e:
         logger.info(f"ERROR", e)
         return {
