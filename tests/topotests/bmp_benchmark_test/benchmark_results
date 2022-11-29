@@ -6,6 +6,7 @@ import operator
 import os
 import sys
 
+import matplotlib.figure
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import ticker, scale
@@ -58,23 +59,30 @@ def load_files_from_router(rname):
 
 # take object {timestamp:number, events:[]}
 # "normalize" timestamp (set time reference to lowest event timestamp)
-# return 2 list of all ingress and outgress events separated
-def unzip_ingress_outgress(vrf_log_json):
+# return 2 list of all event_start and event_end events separated
+def unzip_event_start_event_end(vrf_log_json):
     def _normalize_timestamp(event, ref_timestamp):
         event["timestamp"] = event["timestamp"] - ref_timestamp
         return event
 
     ref_timestamp = vrf_log_json.get("events")[0].get("timestamp")
-    return [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if x.get("ingress") == 1], \
+
+    # we want leak == 0 in event_end because :
+    #   1. vpn recv ipv4 uni update for prefixA  => leak=false event_begin=true type=UPD afi_safi=ipv4Uni prefix=prefixA
+    #   2. vpn leak to default                   => leak=true  event_begin=false type=UPD afi_safi=ipv4Uni prefix=prefixA
+    #   3. vpn send ipv4 uni update for to peers => leak=false event_begin=false type=UPD afi_safi=ipv4Uni prefix=prefixA
+    # and we don't want to consider the end of the event to be the leak instead of the msg snd to peers
+    return [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if x.get("event_begin") == 1], \
            [_normalize_timestamp(x, ref_timestamp) for x in vrf_log_json.get("events") if
-            x.get("ingress") == 0 and x.get("leak") == 0], \
-           [x for x in vrf_log_json.get("events")]
+            x.get("event_begin") == 0 and x.get("leak") == 0], \
+           [_normalize_timestamp(x, ref_timestamp) if x.get("timestamp") >= ref_timestamp else x for x in
+            vrf_log_json.get("events")]
 
 
 # take object {timestamp:number, events:[])}
-# separate ingress and outgress
-# find next outgress msg related to prefix of each ingress msg
-# return [ingress, next_outgress]
+# separate event_start and event_end
+# find next event_end msg related to prefix of each event_start msg
+# return [event_start, next_event_end]
 def match_events(vrf_info, vrf_log_json):
     def _find_prefix_after_msg(events_list, trig_event):
         return next(filter(
@@ -102,12 +110,15 @@ def match_events(vrf_info, vrf_log_json):
             # TODO add rd equals check (shouldn't change anything)
             events_all), None)
 
-    ingress, outgress, normalized_all = unzip_ingress_outgress(vrf_log_json)
+    if len(vrf_log_json.get("events")) == 0:
+        return []
 
-    return [(ingress_x, (_find_prefix_after_msg(outgress, ingress_x)
-                         if not _is_leak(ingress_x)
-                         else _find_prefix_after_leak(normalized_all, ingress_x)
-                         )) for ingress_x in ingress]
+    event_start, event_end, normalized_all = unzip_event_start_event_end(vrf_log_json)
+
+    return [(event_start_x, (_find_prefix_after_msg(event_end, event_start_x)
+                             if not _is_leak(event_start_x)
+                             else _find_prefix_after_leak(normalized_all, event_start_x)
+                             )) for event_start_x in event_start]
 
 
 # take [{"total": int, "details": []}]
@@ -193,7 +204,7 @@ def plot_ram_usage(per_module_ram_usage):
         ax.legend()
         plt.title(make_plot_title(f"FRR Modules Memory Usage Monitoring\n w/o {' '.join(list(map(str, excepted)))}",
                                   len(labels), exp_duration_txt, "Timeseries"))
-        plt.show()
+        render_plot(plt.gcf())
 
     # plot all excepted timestamps which aren't y values
     _plot_line_ram_usage({"timestamp"})
@@ -237,7 +248,7 @@ def plot_ram_usage(per_module_ram_usage):
     plt.ylabel("Memory Usage (MB)")
     plt.xlabel("Time (s)")
     plt.title(make_plot_title("FRR BMP RAM Usage Monitoring", len(labels), exp_duration_txt, "Timeseries"))
-    plt.show()
+    render_plot(plt.gcf())
 
     ax = plt.gca()
     unit_scale = 1e-6
@@ -262,7 +273,7 @@ def plot_ram_usage(per_module_ram_usage):
     ax.set_xlabel("Time (s)")
     ax.legend()
     plt.title(make_plot_title("FRR BGP+BMP+lmlogs Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
-    plt.show()
+    render_plot(plt.gcf())
 
     ax = plt.gca()
     ax.bar(bins,
@@ -278,7 +289,7 @@ def plot_ram_usage(per_module_ram_usage):
     ax.set_xlabel("Time (s)")
     ax.legend()
     plt.title(make_plot_title("FRR BGP+BMP Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
-    plt.show()
+    render_plot(plt.gcf())
 
     # plot logging system ram usage
     logs_ram_usage_values = benchmark_logs_get_ram_usage(per_module_ram_usage)
@@ -296,7 +307,7 @@ def plot_ram_usage(per_module_ram_usage):
     axs_logmem_lineplot.set_xlabel("Time (s)")
     axs_logmem_lineplot.set_ylabel("Memory usage (bytes)")
     axs_logmem_lineplot.legend()
-    fig_logmem_lineplot.show()
+    render_plot(fig_logmem_lineplot)
 
     # bmp usage repartition by memory types
     for column_type in set(_get_column_types().keys()) - {"size", 'title'}:
@@ -309,7 +320,7 @@ def plot_ram_usage(per_module_ram_usage):
             make_plot_title("BMP Memory Use Repartition across datatypes", len(result), exp_duration_txt, "Timeseries"))
         plt.ylabel(_get_column_display_name(column_type))
         plt.xlabel("Time (s)")
-        plt.show()
+        render_plot(plt.gcf())
 
     modules_types_sizes = get_modules_datatypes_and_sizes(
         {k: v for k, v in per_module_ram_usage.items() if k not in ["timestamp"]})
@@ -326,7 +337,7 @@ def plot_ram_usage(per_module_ram_usage):
         ax.set_ylabel("Size (bytes)")
         ax.set_xlabel("Datatype")
         ax.legend()
-    plt.show()
+    render_plot(plt.gcf())
 
 
 def plot_cpu_usage(per_module_ram_usage, logs, matches):
@@ -366,7 +377,7 @@ def plot_cpu_usage(per_module_ram_usage, logs, matches):
         axs_hist[i].set_xlabel("Duration (ms)")
         axs_hist[i].legend()
 
-    plt.show()
+    render_plot(plt.gcf())
 
 
 plt_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -386,6 +397,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
     fig, axs = plt.subplots(len(logs), 1, figsize=(6.4 * fig_scale[0], fig_scale[1] * 4.8))
     for i, vrf_log in enumerate(logs):
         match = matches[i]
+        if not match: continue
 
         def in_timestamp__duration__out_timestamp():
             return map(lambda t: (
@@ -396,7 +408,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
                 t[1].get("timestamp") * 1e-9),
                        filter(lambda t: None not in t, match))
 
-        prefix, withdraws, in_timestamp, duration, out_timestamp = zip(*in_timestamp__duration__out_timestamp())
+        prefix, pair_type, in_timestamp, duration, out_timestamp = zip(*in_timestamp__duration__out_timestamp())
 
         index_to_prefix = list(set(map(lambda t: t[0].get("prefix"), filter(lambda t: None not in t, match))))
         prefix_to_index = {prefix: index for index, prefix in enumerate(index_to_prefix)}
@@ -407,7 +419,14 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
             counters[p] += 1
             return x
 
-        series_settings = {"W->W": "red", "U->U": "green", "U->W": "orange", "W->U": "blue"}
+        series_settings = {
+            "W->W": "red",
+            "U->U": "green",
+            "U->W": "orange",
+            "W->U": "blue",
+            "U->N": "purple",
+            "W->N": "black"
+        }
 
         def _color_mapper(x):
             return series_settings.get(x)
@@ -420,7 +439,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
         plt.legend(handles=legend_elements, )
 
         y = list(map(_get_height_for_prefix, prefix))
-        axs[i].hlines(y, in_timestamp, out_timestamp, colors=color_mapper(withdraws), lw=2.5)
+        axs[i].hlines(y, in_timestamp, out_timestamp, colors=color_mapper(pair_type), lw=2.5)
         axs[i].hlines([index - 0.05 for index in range(len(prefix_to_index))], 0, 1e40, colors="grey", lw=0.5)
 
         def _labels_formatter(y, pos):
@@ -428,13 +447,36 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
 
         axs[i].set_ylim([0, len(prefix_to_index)])
         axs[i].set_xlim([0, np.max(out_timestamp)])
-        axs[i].yaxis.set_major_formatter(
-            ticker.FuncFormatter(_labels_formatter))
-    plt.show()
+
+        start, end = axs[i].get_ylim()
+        axs[i].yaxis.set_ticks(np.arange(start, end, 1))
+        axs[i].yaxis.set_major_formatter(ticker.FuncFormatter(_labels_formatter))
+        axs[i].yaxis.set_minor_formatter(ticker.FuncFormatter(_labels_formatter))
+
+        duration_s, duration_str = timestamps_to_duration(in_timestamp + out_timestamp)
+        axs[i].set_title(
+            make_plot_title(f"VRF {vrf_log['vrf']} {vrf_log['vrf_name']}\nBenchmark Prefixes Update/Withdraw Timeline",
+                            len(in_timestamp), duration_str, "Gantt Plot"))
+
+    render_plot(plt.gcf())
 
 
 def load_vrf_info(logs):
     return {log["router_id"]: {k: log[k] for k in ["router_id", "vrf", "vrf_name"]} for log in logs}
+
+
+plot_index = 0
+
+
+def render_plot(fig: matplotlib.figure.Figure):
+    global plot_index
+    if plt.get_fignums() == 0:
+        print("no figure to plot")
+        return
+
+    fig.savefig(f"plots/plot_{plot_index}.svg", format="svg")
+    plt.close(fig)
+    plot_index += 1
 
 
 def main():
@@ -448,9 +490,6 @@ def main():
         dummy = {"total": -69, "details": []}
         per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
 
-    for log in logs:
-        pass  # log["events"] = list(filter(lambda x: not bool(x.get("leak")), log["events"]))
-
     vrf_info = load_vrf_info(logs)
     print("vrf infos: \n", vrf_info)
 
@@ -458,34 +497,8 @@ def main():
 
     print("matching events")
     matches = [match_events(vrf_info, vrf_log) for vrf_log in logs]
-    for log in matches:
-        for match in log:
-            if None in match: continue
-            if match[0].get("type") not in [0, 1] and match[1].get("type") not in [0, 1]:
-                print("CAREFUL! NOT ONLY UPDATE AND WITHDRAW")
-            if 0 in [match[0].get("successful"), match[1].get("successful")]:
-                print("CAREFUL! NOT ONLY SUCCESSFUL MESSAGES")
-
     plot_cpu_usage(per_module_ram_usage, logs, matches)
-
-    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 10.))
-
-    for match in matches:
-        def in_timestamp__duration__out_timestamp():
-            return map(lambda t: (
-                t[0].get("prefix"),
-                "{}->{}".format(type_to_char(t[0].get("type")), type_to_char(t[1].get("type"))),
-                t[0].get("timestamp") * 1e-9,
-                (t[1].get("timestamp") - t[0].get("timestamp")) * 1e-9,
-                t[1].get("timestamp") * 1e-9,
-                bool(t[0].get("leak")),
-            ),
-                       filter(lambda t: None not in t, match))
-
-        prefix, withdraws, in_timestamp, duration, out_timestamp, leak = zip(*in_timestamp__duration__out_timestamp())
-        data = np.array(list(zip(duration, leak)))
-        # [np.mean(data[data[:, 1] == x], axis=0) for x in [0, 1]]
-        # => leaking is faster than sending messages => makes sense
+    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
 
 
 if __name__ == "__main__":

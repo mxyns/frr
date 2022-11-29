@@ -3267,7 +3267,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 					   .timestamp = lml_time(),
 					   .is_leak = false,
 					   .type = 2,
-					   .is_ingress = 1,
+					   .event_begin = false,
 					   .is_successful = false,
 					   .afi = afi,
 					   .safi = safi,
@@ -3275,6 +3275,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 					   .prefix = *bgp_dest_get_prefix(dest),
 					   .prefix_rd = prd_ref ? *prd_ref : dummy_prd
 				   });
+
+
 		return;
 	}
 
@@ -4882,7 +4884,7 @@ int bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 				   .timestamp = lml_time(),
 				   .is_leak = false,
 				   .type = 0,
-				   .is_ingress = true,
+				   .event_begin = true,
 				   .is_successful = true,
 				   .afi = afi,
 				   .safi = safi,
@@ -5038,7 +5040,7 @@ int bgp_withdraw(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 					   .timestamp = lml_time(),
 					   .is_leak = false,
 					   .type = 1,
-					   .is_ingress = true,
+					   .event_begin = true,
 					   .is_successful = true,
 					   .afi = afi,
 					   .safi = safi,

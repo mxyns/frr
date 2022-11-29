@@ -224,7 +224,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 	snprintfrr(line, 512, "{"
 				     "\"timestamp\": %lu, "
 				     "\"leak\": %d, "
-				     "\"ingress\": %d, "
+				     "\"event_begin\": %d, "
 				     "\"type\": %d, "
 				     "\"successful\": %d, "
 				     "\"afi_safi\": \"%s\", "
@@ -233,7 +233,7 @@ static void bgp_dump_bench_log(struct bgp_bench_log *log, struct bgp_bench_stack
 				     "\"rd\": \"%s\"}",
 				     entry->timestamp,
 				     entry->is_leak,
-				     entry->is_ingress,
+				     entry->event_begin,
 				     entry->type,
 				     entry->is_successful,
 				     get_afi_safi_str(entry->afi, entry->safi, true),

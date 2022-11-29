@@ -5,11 +5,11 @@
 """
 import glob
 import json
+import multiprocessing
 import os
 import random
 import re
 import sys
-import threading
 import time
 
 import pytest
@@ -72,6 +72,7 @@ def build_topo(tgen):
 
     provider_router_1 = tgen.add_router("prvdr1")
     tgen.add_link(uut, provider_router_1, "uut-eth4", "prvdr1-eth0")
+    tgen.add_link(uut, provider_router_1, "uut-eth5", "prvdr1-eth1")
 
 
 # New form of setup/teardown using pytest fixture
@@ -91,20 +92,23 @@ def tgen(request):
     # This function initiates the topology build with Topogen...
     tgen = Topogen(build_topo, request.module.__name__)
 
-    topo_running = False
+    topo_running = multiprocessing.Value('i', 0)
 
-    def _monitor_ram_usage(rnode):
+    def _monitor_ram_usage(rnode, topo_running_shared):
         logger.info("RAM MONITOR")
 
         # wait for topology to start
-        while not topo_running:
+        while topo_running_shared.value == 0:
             time.sleep(0.1)
 
         all_daemons_found = {}
 
         ram_usages = list()
         # wait for topology to stop
-        while topo_running:
+        freq = 100  # Hz
+        period = 1.0 / freq
+        while topo_running_shared.value > 0:
+            start = time.time()
             usage = get_router_ram_usages(rnode)
             logger.info("adding {} values".format(len(usage.keys())))
             ram_usages.append({"timestamp": time.time_ns(), "usage": usage})
@@ -113,6 +117,10 @@ def tgen(request):
             if usage != {}:
                 # add keys but with 0 value
                 all_daemons_found = all_daemons_found | {k: {"total": 0, "details": []} for k in usage.keys()}
+
+            end = time.time()
+            duration = start - end
+            time.sleep(min(max(0, period - duration), period))
 
         # dump mem usage results
         filepath = "{}/{}/benchmark/ram_usage".format(CWD, rnode.name)
@@ -127,10 +135,13 @@ def tgen(request):
             ram_usages_json = json.dumps(ram_usages)
             f.write(ram_usages_json)
 
-    ram_usage_threads = [threading.Thread(target=_monitor_ram_usage, args=(tgen.gears[rname],)) for rname in ["uut"]]
-    [thread.start() for thread in ram_usage_threads]
+    ram_usage_tasks = [multiprocessing.Process(target=_monitor_ram_usage, args=(tgen.gears[rname], topo_running,)) for
+                       rname in ["uut"]]
+    [task.start() for task in ram_usage_tasks]
 
-    topo_running = True
+    with topo_running.get_lock():
+        topo_running.value = 1
+
     tgen.start_topology()
 
     router_list = tgen.routers()
@@ -158,8 +169,10 @@ def tgen(request):
     # Teardown after last test runs
     tgen.stop_topology()
 
-    topo_running = False
-    [thread.join() for thread in ram_usage_threads]
+    with topo_running.get_lock():
+        topo_running.value = 0
+
+    [task.join() for task in ram_usage_tasks]
 
 
 # Fixture that executes before each test
@@ -254,21 +267,27 @@ def test_connectivity(tgen):
     output = uut.cmd_raises("ping -c1 20.0.2.2 -I uut-eth3")
 
     _log_ce(prvdr1)
-    output = prvdr1.cmd_raises("ping -c1 100.0.001.1")
+    output = prvdr1.cmd_raises("ping -c1 100.0.001.1 -I prvdr1-eth0")
     output = uut.cmd_raises("ping -c1 100.0.001.2 -I uut-eth4")
+    output = prvdr1.cmd_raises("ping -c1 100.0.002.1 -I prvdr1-eth1")
+    output = uut.cmd_raises("ping -c1 100.0.002.2 -I uut-eth5")
 
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
     time.sleep(3)
 
-    def _show_all(router):
+    def _show_all(router, vrfs=None):
+        if vrfs is None:
+            vrfs = []
         o = router.vtysh_cmd("do show bgp sum")
+        for vrf in vrfs: o = router.vtysh_cmd(f"do show bgp vrf {vrf} sum")
         o = router.vtysh_cmd("do show bgp all")
 
     _show_all(ce1)
     _show_all(ce2)
-    _show_all(uut)
+    _show_all(uut, vrfs=["BLUE"])
+    _show_all(prvdr1, vrfs=["BLUE"])
 
     o = tgen.gears["uut"].vtysh_cmd("do show bmp")
 
@@ -313,6 +332,28 @@ def test_query_ram_usage(tgen):
     logger.info("ram usages : " + str(ram_usages))
 
 
+def _test_multiple_path(tgen):
+    def __send_prefixes_cmd(gear_asn, prefixes, yes):
+        gear, asn = gear_asn
+        gear.vtysh_cmd(
+            """configure terminal
+               router bgp ASN
+               PREFIXES
+            """.replace("ASN", str(asn))
+            .replace("PREFIXES", "\n".join([f"{'no ' if not yes else ''}network " + prefix for prefix in prefixes]))
+        )
+
+    uut = tgen.gears["uut"]
+    p1, p2 = tgen.gears["p1"], tgen.gears["p2"]
+
+    __send_prefixes_cmd((p2, 102), ["1.6.92.0/22"], True)
+    time.sleep(.2)
+    __send_prefixes_cmd((p1, 101), ["1.6.92.0/22"], True)
+    time.sleep(1)
+    __send_prefixes_cmd((p2, 102), ["1.6.92.0/22"], False)
+    time.sleep(.5)
+
+
 def test_prefix_spam(tgen):
     """Test the prefix announcement capability of p1"""
 
@@ -347,34 +388,36 @@ def test_prefix_spam(tgen):
         logger.info("Loaded prefixes: " + str(prefixes))
         logger.info(f"Repeat interval is {interval}ms")
 
-        thread = threading.Thread(target=_send_prefixes, args=(gear, prefixes, n, interval, pick_random))
+        task = multiprocessing.Process(target=_send_prefixes, args=(gear, prefixes, n, interval, pick_random))
 
-        return thread
+        return task
 
     def _norm_slice(arr, start_perc, end_perc):
         logger.info(f"slicing from {start_perc * 100.0}% to {end_perc * 100.0}%")
         return arr[int(start_perc * len(arr)):int(end_perc * len(arr))]
 
     ref_file = "{}/{}".format(CWD, prefix_file)
-    spammers = [("ce1", 200), ("p1", 101)]  # rname, asn
+    spammers = [("ce1", 200), ("ce2", 200), ("p1", 101), ("p2", 102)]  # rname, asn
     spammer_count = len(spammers)
-    threads = []
+    tasks = []
 
     with open(ref_file) as file:
         prefixes = json.load(file).get("prefixes")
         for idx, spammer in enumerate(spammers):
             spammer = (tgen.gears[spammer[0]], spammer[1])
-            prefixes_slice = _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count)
-            thread = _run_periodic_prefixes(spammer, prefixes_slice, 10, 1000, pick_random=100)
-            threads.append(thread)
-            thread.start()
+            # prefixes_slice = _norm_slice(prefixes, float(idx) / spammer_count, float(idx + 1.0) / spammer_count)
+            prefixes_slice = prefixes
+            task = _run_periodic_prefixes(spammer, prefixes_slice, 10, 1000, pick_random=-1)
+            tasks.append(task)
+            task.start()
 
-    while True in [thread.is_alive() for thread in threads]:
+    while True in [task.is_alive() for task in tasks]:
         time.sleep(.5)
-        uut.vtysh_cmd("do show bmp")
-        uut.vtysh_cmd("do show bgp all")
+        for rnode in tgen.routers().values(): rnode.vtysh_cmd("do show bmp")
+        for rnode in tgen.routers().values(): rnode.vtysh_cmd("do show bgp sum")
+        for rnode in tgen.routers().values(): rnode.vtysh_cmd("do show bgp all")
 
-    [thread.join() for thread in threads]
+    [task.join() for task in tasks]
 
 
 def export_benchmark_logs(tgen, rnames=None, routers=None):

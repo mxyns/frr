@@ -383,7 +383,7 @@ LML_DEFINE_TYPES(bgp_bench, struct bgp_bench, LML_NO_OPT, LML_NO_OPT,
 			time_t timestamp;
 			bool is_leak;
 			int type; // 0 == UPDATE | 1 == WITHDRAW | 2 == BGP DP NO-OP
-			bool is_ingress;
+			bool event_begin; // 1 == start of event (recv UPD/WTH) | 0 == end of end (snd UPD/WTH || no-op)
 			bool is_successful;
 			afi_t afi;
 			safi_t safi;
