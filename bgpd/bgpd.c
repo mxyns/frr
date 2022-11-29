@@ -3137,7 +3137,7 @@ static struct bgp *bgp_create(as_t *as, const char *name,
 
 	bgp = XCALLOC(MTYPE_BGP, sizeof(struct bgp));
 
-	bgp->bgp_bench_log = bgp_bench_log_new(1 << 20);
+	bgp->bgp_bench_log = bgp_bench_log_new(1 << 18);
 
 	if (BGP_DEBUG(zebra, ZEBRA)) {
 		if (inst_type == BGP_INSTANCE_TYPE_DEFAULT)

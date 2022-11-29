@@ -150,13 +150,13 @@ def make_bins_from_timeseries(values, nbin=None, binsize=None):
     return np.array(list(range(nbin))), np.mean(binned, axis=1)
 
 
-def format_duration_for_display(duration):
+def format_number_for_display(duration):
     return str(np.round(duration, 2))
 
 
 def timestamps_to_duration(timeseries_timestamps):
     duration_s = np.max(timeseries_timestamps - np.min(timeseries_timestamps)) * 1e-9
-    return duration_s, format_duration_for_display(duration_s)
+    return duration_s, format_number_for_display(duration_s)
 
 
 def scale_x_axis_for_duration(x_axis, duration):
@@ -171,11 +171,27 @@ def make_plot_title(title, sample_count, duration_txt, tyqe):
     return f"{title}\n{sample_count} samples over {duration_txt} seconds\n{tyqe}"
 
 
-def plot_data_stats(axis, data, data_label=None, mean=False, median=False):
-    if mean: axis.axhline(y=np.nanmean(data), color=plt_colors[len(axis.lines)],
-                          label=f"mean of {data_label}" if data_label is not None else None)
-    if median: axis.axhline(y=np.nanmedian(data), color=plt_colors[len(axis.lines)],
-                            label=f"median of {data_label}" if data_label is not None else None)
+def plot_data_stats(axis, data, data_label=None, with_line=True, mean=False, median=False):
+    if with_line:
+        color = plt_colors[len(axis.lines) % len(plt_colors)]
+    else:
+        color = None
+
+    def _plot_stat_line(axis, stat, color, data_label, label_pfx):
+        lbl = f"{label_pfx} {data_label} = {format_number_for_display(stat)}" if data_label is not None else None
+        if with_line:
+            axis.axhline(y=stat, color=color, label=lbl)
+        else:
+            line2d = Line2D([], [], label=lbl)
+            axis.add_line(line2d)
+
+    if mean:
+        mean = np.nanmean(data)
+        _plot_stat_line(axis, mean, color, data_label, "mean of")
+
+    if median:
+        median = np.nanmedian(data)
+        _plot_stat_line(axis, median, color, data_label, "median of")
 
 
 def sync_timeseries(reference, series_list):
@@ -198,7 +214,10 @@ def plot_ram_usage(per_module_ram_usage):
         for idx, (process, mem_use) in enumerate(
                 {k: per_module_ram_usage[k] for k in
                  set(per_module_ram_usage.keys()) - excepted}.items()):  # exclude bgpd (sum of the others) timestamps (not data values)
-            ax.plot(labels, np.array(list(map(_get_total_from_dict, mem_use))) * 1e-6, label=f"{process} daemon")
+            data = np.array(list(map(_get_total_from_dict, mem_use))) * 1e-6
+            lbl = f"{process} daemon"
+            ax.plot(labels, data, label=lbl)
+            plot_data_stats(ax, data, data_label=lbl, median=True, mean=True, with_line=False)
         ax.set_ylabel("Memory Usage (MB)")
         ax.set_xlabel("Time (s)")
         ax.legend()
@@ -287,8 +306,10 @@ def plot_ram_usage(per_module_ram_usage):
            )
     ax.set_ylabel("Memory Usage (MB)")
     ax.set_xlabel("Time (s)")
-    ax.legend()
     plt.title(make_plot_title("FRR BGP+BMP Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
+    plot_data_stats(ax, bgpd_values_scaled, data_label="bgpd module", mean=True, median=True)
+    plot_data_stats(ax, bgpd_values_scaled + bmp_values_scaled, data_label="bmp module", mean=True, median=True)
+    ax.legend()
     render_plot(plt.gcf())
 
     # plot logging system ram usage
@@ -356,7 +377,7 @@ def plot_cpu_usage(per_module_ram_usage, logs, matches):
 
         total_sample_count = len(cpu_delay)
         total_time_spent = sum(list(in_timestamp__duration())[-1]) - match[0][0].get("timestamp") * 1e-9
-        total_time_spent_txt = format_duration_for_display(total_time_spent)
+        total_time_spent_txt = format_number_for_display(total_time_spent)
 
         axs_cpu_lineplot[i].plot(make_x_axis_for_timeseries(cpu_delay, total_time_spent), cpu_delay,
                                  color=plt_colors[0], label='cpu latency (ms)')
@@ -479,7 +500,12 @@ def render_plot(fig: matplotlib.figure.Figure):
     plot_index += 1
 
 
+figscaling = 3
+
+
 def main():
+    default_figsize = matplotlib.rcParamsDefault['figure.figsize']
+    matplotlib.rcParams['figure.figsize'] = (default_figsize[0] * figscaling, default_figsize[1] * figscaling)
     logs, ram_usage = load_files_from_router("uut")
 
     if len(ram_usage) > 0:
