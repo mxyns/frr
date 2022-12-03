@@ -1,3 +1,5 @@
+#!/bin/sh
+
 NAME=$1
 ID=$2
 ITF=$3

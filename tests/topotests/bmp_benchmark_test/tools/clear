@@ -1,0 +1,4 @@
+#!/bin/sh
+sudo rm -rf bmp_benchmark_test/out/*
+sudo rm -rf /tmp/topotests
+sudo rm -rf /tmp/benchmark_*_vrf_*
