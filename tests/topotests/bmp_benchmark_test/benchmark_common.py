@@ -91,8 +91,6 @@ def setup_router_vrf(router):
             for line in vrf_config.readlines():
                 logger.info("adding vrf {}({}) and binding if {}".format(*line.split(" ")))
                 router.cmd("/bin/bash {}/tools/mkvrf {}".format(CWD, line.strip()))
-                print(f"MAKING VRF {router.name} {line.strip()}")
-                print(f"CMD " + "/bin/bash {}/tools/mkvrf {}".format(CWD, line.strip()))
 
 
 def init_test(request, ctx):
@@ -150,7 +148,6 @@ def fini_test(tgen, ctx):
 
 def default_config_loader(tgen, overrides):
     backup = os.environ["PYTEST_TOPOTEST_SCRIPTDIR"]
-    print(f"BACKUP {backup}")
     os.environ["PYTEST_TOPOTEST_SCRIPTDIR"] = f"{backup}/routers"
 
     def _daemon_config(rname, daemonRD):
@@ -472,8 +469,8 @@ def test_connectivity(tgen):
     o = tgen.gears["uut"].vtysh_cmd("do show bmp")
 
     o = tgen.gears["uut"].vtysh_cmd("do show bgp vrfs json", isjson=True)
-    print(tgen.gears["uut"].vtysh_cmd("do show run"))
-    assert print(o) or o["totalVrfs"] == 2
+    
+    assert o["totalVrfs"] == 2
 
     # TODO add bgp peering assert
 

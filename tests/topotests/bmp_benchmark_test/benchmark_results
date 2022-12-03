@@ -194,7 +194,7 @@ def plot_data_stats(axis, data, data_label=None, with_line=True, mean=False, med
     if peak:
         peak = np.max(data)
         _plot_stat_line(axis, peak, color, data_label, "peak of")
-        
+
 
 def sync_timeseries(reference, series_list):
     return np.array([np.interp(reference, series[:, 0], series[:, 1]) for series in series_list])
