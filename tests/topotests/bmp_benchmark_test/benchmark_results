@@ -2,6 +2,7 @@
 import functools
 import glob
 import json
+import multiprocessing
 import operator
 import os
 import sys
@@ -113,10 +114,12 @@ def match_events(vrf_info, vrf_log_json):
 
     event_start, event_end, normalized_all = unzip_event_start_event_end(vrf_log_json)
 
-    return [(event_start_x, (_find_prefix_after_msg(event_end, event_start_x)
-                             if not _is_leak(event_start_x)
-                             else _find_prefix_after_leak(normalized_all, event_start_x)
-                             )) for event_start_x in event_start]
+    def mp_map(event_start_x):
+        return (event_start_x, (_find_prefix_after_msg(event_end, event_start_x) if not _is_leak(
+            event_start_x) else _find_prefix_after_leak(normalized_all, event_start_x)))
+
+    with multiprocessing.Pool() as pool:
+        return pool.map(mp_map, event_start)
 
 
 # take [{"total": int, "details": []}]
@@ -310,7 +313,8 @@ def plot_ram_usage(per_module_ram_usage):
     ax.set_xlabel("Time (s)")
     plt.title(make_plot_title("FRR BGP+BMP Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
     plot_data_stats(ax, bgpd_values_scaled, data_label="bgpd module", mean=True, peak=True, median=True)
-    plot_data_stats(ax, bgpd_values_scaled + bmp_values_scaled, data_label="bmp module", mean=True, median=True, peak=True)
+    plot_data_stats(ax, bgpd_values_scaled + bmp_values_scaled, data_label="bmp module", mean=True, median=True,
+                    peak=True)
     ax.legend()
     render_plot(plt.gcf())
 
@@ -544,7 +548,10 @@ def main():
         print(f"please specify a valid test_name from : \n{opts}")
         sys.exit(1)
 
-    def _run_one():
+    def _run_one(test_name_farg):
+        global test_name
+        test_name = test_name_farg
+
         print(f"TEST {test_name}")
 
         global plot_index
@@ -566,18 +573,18 @@ def main():
         plot_ram_usage(per_module_ram_usage)
 
         print("matching events")
-        matches = [match_events(vrf_info, vrf_log) for vrf_log in logs]
+        with multiprocessing.Pool(processes=min(os.cpu_count(), len(logs))) as pool:
+            matches = pool.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
+
         plot_cpu_usage(logs, matches)
         plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
 
     global test_name
     if test_name_arg != "*":
-        test_name = test_name_arg
-        _run_one()
+        _run_one(test_name_arg)
     else:
-        for test_name_i in test_names_arg_opts:
-            test_name = test_name_i
-            _run_one()
+        with multiprocessing.Pool(processes=min(os.cpu_count(), len(test_names_arg_opts))) as pool:
+            _ = pool.map(_run_one, test_names_arg_opts, chunksize=1)
 
 
 if __name__ == "__main__":
