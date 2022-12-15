@@ -13,24 +13,24 @@ import sys
 import time
 
 import pytest
+from bmp_benchmark_test.frr_memuse_log_parse import get_modules_total_and_logs
 from lib.bgp import verify_bgp_convergence_from_running_config
+from lib.common_config import run_frr_cmd
 from lib.topogen import Topogen, TopoRouter
 from lib.topolog import logger
-
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import get_modules_total_and_logs
-from tests.topotests.lib.common_config import run_frr_cmd
 
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
-reference_prefixes_registry = []
+reference_prefixes_registry = dict()
 
 
-def load_prefix_file(prefix_file):
+def load_prefix_files(prefix_files):
     global reference_prefixes_registry
-    ref_file = "{}/{}".format(CWD, prefix_file)
-    with open(ref_file) as file:
-        reference_prefixes_registry = json.load(file).get("prefixes")
+    for name, rel_path in prefix_files.items():
+        ref_file = "{}/{}".format(CWD, rel_path)
+        with open(ref_file) as file:
+            reference_prefixes_registry[name] = json.load(file).get("prefixes")
 
 
 # TODO: select markers based on daemons used during test
@@ -117,7 +117,7 @@ def init_test(request, ctx):
     # Start and configure the router daemons
     tgen.start_router()
 
-    load_prefix_file(ctx["prefixes_input_file"])
+    load_prefix_files(ctx["prefixes_input_files"])
 
     return tgen, {
         "ram_usage_tasks": ram_usage_tasks,
@@ -148,19 +148,39 @@ def fini_test(tgen, ctx):
 
 def default_config_loader(tgen, overrides):
     backup = os.environ["PYTEST_TOPOTEST_SCRIPTDIR"]
-    os.environ["PYTEST_TOPOTEST_SCRIPTDIR"] = f"{backup}/routers"
+    current_scriptdir = f"{backup}/routers"
+    os.environ["PYTEST_TOPOTEST_SCRIPTDIR"] = current_scriptdir
 
     def _daemon_config(rname, daemonRD):
-        default = {"file": f"{TopoRouter.RD[daemonRD]}.conf", "args": ""}
+        default = {"file": f"{TopoRouter.RD[daemonRD]}.conf", "args": "", "prefixes": None}
         return default | overrides[rname][daemonRD] \
             if rname in overrides and overrides[rname].get(daemonRD) is not None \
             else default
+
+    def _abs_path(target, roots=(CWD,)):
+        return os.path.join(*roots, target)
 
     for rname, router in tgen.routers().items():
         router.load_config(TopoRouter.RD_ZEBRA, "zebra.conf")
 
         bgp_config = _daemon_config(rname, TopoRouter.RD_BGP)
+        print(rname, bgp_config)
+        if bgp_config["prefixes"] is not None and os.path.exists(
+                prefixes_file_absolute_path := _abs_path(bgp_config["prefixes"])):
+            with open(prefixes_file_absolute_path) as prefixes_file:
+                prefixes = json.load(prefixes_file)["prefixes"]
+                print("initial prefixes count", len(prefixes))
+            with open(_abs_path(bgp_config["file"], (current_scriptdir, rname))) as config_file:
+                config = config_file.read().replace("### INIT_PREFIXES_PLACEHOLDER ###",
+                                                    prefixes_announce_cmd_list(prefixes, update=True), 1)
+                with open(_abs_path(bgp_config["file"] + ".test", (current_scriptdir, rname)), "w") as temp_config_file:
+                    temp_config_file.write(config)
+                    bgp_config["file"] = bgp_config["file"] + ".test"
+                    bgp_config["delete_config"] = temp_config_file.name
         router.load_config(TopoRouter.RD_BGP, bgp_config["file"], bgp_config["args"])
+
+        if bgp_config.get("delete_config") is not None:
+            os.remove(bgp_config["delete_config"])
 
         setup_router_vrf(router)
 
@@ -248,15 +268,21 @@ def make_memusage_monitors(tgen, rnames, output_dir_format, freq=100.0):
     return ram_usage_tasks, topo_running
 
 
+# Make a list of network announce commands from a list of prefixes
+# Update command if update parameter is True else withdraw command is given
+def prefixes_announce_cmd_list(prefixes, update):
+    return "\n".join(
+        [f"{'no ' if not update else ''}network " + prefix for prefix in prefixes])
+
+
 # Send a bgp announce command to FRR router
 def send_prefixes_announce_cmd(gear_asn, prefixes, update):
     gear, asn = gear_asn
     gear.vtysh_cmd(
         """configure terminal
-           router bgp ASN
-           PREFIXES
-        """.replace("ASN", str(asn))
-        .replace("PREFIXES", "\n".join([f"{'no ' if not update else ''}network " + prefix for prefix in prefixes]))
+        router bgp ASN 
+        PREFIXES
+        """.replace("ASN", str(asn)).replace("PREFIXES", prefixes_announce_cmd_list(prefixes, update))
     )
 
 
@@ -272,12 +298,13 @@ def make_announcers(tgen, announcers, prefixes, normalize_slices, interval_ms, r
 
         this_time_prefixes = prefixes
         pick_random = min(max(0, pick_random), len(prefixes))
-        for _ in range(n):
+        for i in range(n):
             this_time_prefixes = random.sample(prefixes, k=pick_random) if pick_random > 0 else this_time_prefixes
             send_prefixes_announce_cmd(gear, prefixes, False)
             time.sleep(interval / 1000)
             send_prefixes_announce_cmd(gear, prefixes, True)
             time.sleep(interval / 1000)
+            logger.warning("Announce wave {}/{}".format(i + 1, n))
 
         send_prefixes_announce_cmd(gear, prefixes, False)
 
@@ -469,7 +496,7 @@ def test_connectivity(tgen):
     o = tgen.gears["uut"].vtysh_cmd("do show bmp")
 
     o = tgen.gears["uut"].vtysh_cmd("do show bgp vrfs json", isjson=True)
-    
+
     assert o["totalVrfs"] == 2
 
     # TODO add bgp peering assert
@@ -490,21 +517,23 @@ def test_query_ram_usage(tgen):
 def test_run_scenario(tgen):
     # ipv4 unicast ~1M prefixes
     logger.info(f"Using {len(reference_prefixes_registry)} prefixes for IPv4 Unicast")
-    ipv4uni_1M = reference_prefixes_registry
+    ipv4uni_1M = reference_prefixes_registry["ipv4"]
 
     # ipv4 vpn ~500k prefixes
     logger.info("Selecting 500k prefixes for IPv4 VPN")
-    ipv4vpn_500k = random.sample(reference_prefixes_registry, k=int(len(ipv4uni_1M) / 2))
+    ipv4vpn_500k = reference_prefixes_registry["vpnv4"]
 
     # Iteration count
     N_iter = 50
-    interval_ms = 50
+    interval_ms = 500
     random_pick = 100
 
     # Initial RIB populate
-    logger.info("Populating RIBs")
-    send_prefixes_announce_cmd(gear_asn=(tgen.gears["p1"], 101), prefixes=ipv4uni_1M, update=True)
-    send_prefixes_announce_cmd(gear_asn=(tgen.gears["ce1"], 200), prefixes=ipv4vpn_500k, update=True)
+    # logger.info("Populating RIBs")
+    # logger.info("   RIB P1")
+    # send_prefixes_announce_cmd(gear_asn=(tgen.gears["p1"], 101), prefixes=ipv4uni_1M, update=True)
+    # logger.info("   RIB CE1")
+    # send_prefixes_announce_cmd(gear_asn=(tgen.gears["ce1"], 200), prefixes=ipv4vpn_500k, update=True)
 
     # Prepare tasks
     logger.info("Making announcer tasks")

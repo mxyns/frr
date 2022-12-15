@@ -9,13 +9,13 @@ from lib.topogen import TopoRouter
 
 
 # Import benchmark common functions module
-from tests.topotests.bmp_benchmark_test import benchmark_common as benchcom
+from bmp_benchmark_test import benchmark_common as benchcom
 
 # Import mandatory functions for pytest
-from tests.topotests.bmp_benchmark_test.benchmark_common import get_router_ids, skip_on_failure
+from bmp_benchmark_test.benchmark_common import get_router_ids, skip_on_failure
 
 # Import tests to execute in order of execution
-from tests.topotests.bmp_benchmark_test.benchmark_common import \
+from bmp_benchmark_test.benchmark_common import \
     test_get_version, \
     test_show_runnning_configuration, \
     test_connectivity, \
@@ -28,8 +28,11 @@ from tests.topotests.bmp_benchmark_test.benchmark_common import \
 def tgen(request):
     """Setup/Teardown the environment and provide tgen argument to tests"""
 
-    prefix_file = "prefixes/routeviews_prefixes_more.json"
     test_name = "adjin"
+
+    prefix_file_ipv4 = "prefixes/routeviews_prefixes_more_1M.json"
+    prefix_file_vpnv4 = "prefixes/routeviews_prefixes_more_500k.json"
+
 
     # Run test initialization function
     tgen, init_result = benchcom.init_test(request, ctx={
@@ -37,7 +40,7 @@ def tgen(request):
             "uut": {
                 TopoRouter.RD_BGP: {
                     "file": f"bgpd_{test_name}.conf",
-                    "args": "-M bmp"
+                    "args": "-M bmp",
                 }
             },
             "prvdr1": {
@@ -45,9 +48,22 @@ def tgen(request):
                     "file": "bgpd_bmp.conf",
                     "args": "-M bmp"
                 }
+            },
+            "p1": {
+                TopoRouter.RD_BGP: {
+                    "prefixes": "prefixes/routeviews_prefixes_more_1M.json"
+                }
+            },
+            "ce1": {
+                TopoRouter.RD_BGP: {
+                    "prefixes": "prefixes/routeviews_prefixes_more_500k.json"
+                }
             }
         }),
-        "prefixes_input_file": prefix_file,
+        "prefixes_input_files": {
+            "ipv4": prefix_file_ipv4,
+            "vpnv4": prefix_file_vpnv4
+        },
         "memusage_output_dir": f"%CWD%/out/logs/{test_name}/%rname%/"
     })
 
