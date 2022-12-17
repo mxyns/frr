@@ -293,23 +293,23 @@ def make_announcers(tgen, announcers, prefixes, normalize_slices, interval_ms, r
     announcers_count = len(announcers)
 
     def _send_prefixes_periodic(gear, prefixes, n, interval, pick_random: int = -1):
-        send_prefixes_announce_cmd(gear, prefixes, True)
+        # send_prefixes_announce_cmd(gear, prefixes, True)
         time.sleep(interval / 1000)
 
         this_time_prefixes = prefixes
         pick_random = min(max(0, pick_random), len(prefixes))
         for i in range(n):
             this_time_prefixes = random.sample(prefixes, k=pick_random) if pick_random > 0 else this_time_prefixes
-            send_prefixes_announce_cmd(gear, prefixes, False)
+            send_prefixes_announce_cmd(gear, this_time_prefixes, False)
             time.sleep(interval / 1000)
-            send_prefixes_announce_cmd(gear, prefixes, True)
+            send_prefixes_announce_cmd(gear, this_time_prefixes, True)
             time.sleep(interval / 1000)
-            logger.warning("Announce wave {}/{}".format(i + 1, n))
+            print("Announce wave {}/{}".format(i + 1, n))
 
-        send_prefixes_announce_cmd(gear, prefixes, False)
+        # send_prefixes_announce_cmd(gear, prefixes, False)
 
     def _run_periodic_prefixes(gear, prefixes, n, interval, pick_random=-1):
-        logger.info("Loaded prefixes: " + str(prefixes))
+        logger.info(f"Loaded {len(prefixes)} prefixes")
         logger.info(f"Repeat interval is {interval}ms")
 
         task = multiprocessing.Process(target=_send_prefixes_periodic, args=(gear, prefixes, n, interval, pick_random))
@@ -388,7 +388,9 @@ def get_pids(router: TopoRouter):
 # Get daemons route usage for a router and get default if error
 def get_router_ram_usages(rnode):
     try:
-        o = rnode.vtysh_cmd("show memory bgpd")
+        command = "show memory bgpd"
+        vtysh_command = 'vtysh -c "{}" 2>/dev/null'.format(command)
+        o = rnode.run(vtysh_command)
         return get_modules_total_and_logs(o)
     except Exception as e:
         logger.info(f"ERROR", e)

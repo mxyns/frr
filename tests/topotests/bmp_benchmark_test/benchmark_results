@@ -6,6 +6,7 @@ import multiprocessing
 import operator
 import os
 import sys
+import ray
 
 import matplotlib.figure
 import matplotlib.pyplot as plt
@@ -13,7 +14,7 @@ import numpy as np
 from matplotlib import ticker, scale
 from matplotlib.lines import Line2D
 
-from tests.topotests.bmp_benchmark_test.frr_memuse_log_parse import _get_column_types, _get_column_display_name, \
+from frr_memuse_log_parse import _get_column_types, _get_column_display_name, \
     get_modules_datatypes_and_sizes, \
     _get_series_of_column
 
@@ -82,6 +83,7 @@ def unzip_event_start_event_end(vrf_log_json):
 # separate event_start and event_end
 # find next event_end msg related to prefix of each event_start msg
 # return [event_start, next_event_end]
+@ray.remote
 def match_events(vrf_info, vrf_log_json):
     def _find_prefix_after_msg(events_list, trig_event):
         return next(filter(
@@ -114,13 +116,25 @@ def match_events(vrf_info, vrf_log_json):
 
     event_start, event_end, normalized_all = unzip_event_start_event_end(vrf_log_json)
 
-    def mp_map(event_start_x):
+    revent_start, revent_end, rnormalized_all = ray.put(event_start), ray.put(event_end), ray.put(normalized_all)
+
+    def mp_smolmap(event_start_x, event_end, normalized_all):
         return (event_start_x, (_find_prefix_after_msg(event_end, event_start_x) if not _is_leak(
             event_start_x) else _find_prefix_after_leak(normalized_all, event_start_x)))
 
-    with multiprocessing.Pool() as pool:
-        return pool.map(mp_map, event_start)
+    @ray.remote
+    def mp_bigmap(event_start, el_start, el_end, event_end, normalized_all):
+        return [mp_smolmap(event_start[i], event_end, normalized_all) for i in range(el_start, el_end)]
 
+    el_count = len(event_start)
+    shard_size = 1000
+    shard_count = int(el_count / shard_size)
+
+    def _extend(x, y):
+        x.extend(y)
+        return x
+
+    return functools.reduce(_extend, ray.get([mp_bigmap.remote(event_start, shard_start, shard_end, revent_end, rnormalized_all) for (shard_start, shard_end) in [(int(x*shard_size), int(min((x+1)*shard_size, el_count))) for x in range(shard_count)]]), [])
 
 # take [{"total": int, "details": []}]
 # get every mem_usage field in each event
@@ -532,6 +546,41 @@ def render_plot(fig: matplotlib.figure.Figure):
 figscaling = 3
 
 
+@ray.remote
+def _run_one(test_name_farg):
+	global test_name
+	test_name = test_name_farg
+
+	print(f"TEST {test_name}")
+
+	global plot_index
+	plot_index = 0
+
+	logs, ram_usage = load_files_from_router(test_name, "uut")
+
+	if len(ram_usage) > 0:
+	    per_module_ram_usage = json_obj_split_series(ram_usage)
+	    per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
+	    per_module_ram_usage.pop("usage")
+	else:
+	    dummy = {"total": -69, "details": []}
+	    per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
+
+	vrf_info = load_vrf_info(logs)
+	print("vrf infos: \n", vrf_info)
+
+	plot_ram_usage(per_module_ram_usage)
+
+	print("matching events")
+
+#	matches = workers.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
+	matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
+	plot_cpu_usage(logs, matches)
+	plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
+
+	return 0
+
+
 def main():
     default_figsize = matplotlib.rcParamsDefault['figure.figsize']
     matplotlib.rcParams['figure.figsize'] = (default_figsize[0] * figscaling, default_figsize[1] * figscaling)
@@ -543,48 +592,19 @@ def main():
     test_name_arg = sys.argv[1]
     test_names_arg_opts = os.listdir(os.path.join(CWD, "out", "logs"))
 
+    print(sys.argv, test_name_arg, ["*", *test_names_arg_opts])
     if test_name_arg not in ["*", *test_names_arg_opts]:
         opts = "\n".join(map(lambda x: f"- {x}", test_names_arg_opts))
         print(f"please specify a valid test_name from : \n{opts}")
         sys.exit(1)
 
-    def _run_one(test_name_farg):
-        global test_name
-        test_name = test_name_farg
-
-        print(f"TEST {test_name}")
-
-        global plot_index
-        plot_index = 0
-
-        logs, ram_usage = load_files_from_router(test_name, "uut")
-
-        if len(ram_usage) > 0:
-            per_module_ram_usage = json_obj_split_series(ram_usage)
-            per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
-            per_module_ram_usage.pop("usage")
-        else:
-            dummy = {"total": -69, "details": []}
-            per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
-
-        vrf_info = load_vrf_info(logs)
-        print("vrf infos: \n", vrf_info)
-
-        plot_ram_usage(per_module_ram_usage)
-
-        print("matching events")
-        with multiprocessing.Pool(processes=min(os.cpu_count(), len(logs))) as pool:
-            matches = pool.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
-
-        plot_cpu_usage(logs, matches)
-        plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
-
     global test_name
     if test_name_arg != "*":
-        _run_one(test_name_arg)
+        ray.get(_run_one.remote(test_name_arg))
     else:
-        with multiprocessing.Pool(processes=min(os.cpu_count(), len(test_names_arg_opts))) as pool:
-            _ = pool.map(_run_one, test_names_arg_opts, chunksize=1)
+#        print(workers)
+#        _ = workers.map(functools.partial(_run_one, workers=workers), test_names_arg_opts, chunksize=1)
+        _ = ray.get([_run_one.remote(x) for x in test_names_arg_opts])
 
 
 if __name__ == "__main__":
