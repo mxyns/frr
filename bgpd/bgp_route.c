@@ -4736,6 +4736,22 @@ int bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		zlog_debug("%pBP rcvd %s", peer, pfx_buf);
 	}
 
+
+	struct prefix_rd dummy_prd = {0};
+	bgp_bench_log_push(peer->bgp->bgp_bench_log,
+			   (struct bgp_bench) {
+				   .timestamp = lml_time(),
+				   .is_leak = false,
+				   .type = 0,
+				   .event_begin = true,
+				   .is_successful = true,
+				   .afi = afi,
+				   .safi = safi,
+				   .peerid = peer->remote_id,
+				   .prefix = *p,
+				   .prefix_rd = prd ? *prd : dummy_prd
+			   });
+
 	/* Make new BGP info. */
 	new = info_make(type, sub_type, 0, peer, attr_new, dest);
 
@@ -4878,21 +4894,6 @@ int bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		bgp_path_info_delete(dest, new);
 	}
 
-	struct prefix_rd dummy_prd = {0};
-	bgp_bench_log_push(peer->bgp->bgp_bench_log,
-			   (struct bgp_bench) {
-				   .timestamp = lml_time(),
-				   .is_leak = false,
-				   .type = 0,
-				   .event_begin = true,
-				   .is_successful = true,
-				   .afi = afi,
-				   .safi = safi,
-				   .peerid = peer->remote_id,
-				   .prefix = *p,
-				   .prefix_rd = prd ? *prd : dummy_prd
-			   });
-
 	return 0;
 
 /* This BGP update is filtered.  Log the reason then update BGP
@@ -5021,18 +5022,6 @@ int bgp_withdraw(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* Withdraw specified route from routing table. */
 	if (pi && !CHECK_FLAG(pi->flags, BGP_PATH_HISTORY)) {
-		bgp_rib_withdraw(dest, pi, peer, afi, safi, prd);
-		if (SAFI_UNICAST == safi
-		    && (bgp->inst_type == BGP_INSTANCE_TYPE_VRF
-			|| bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
-			vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp, pi);
-		}
-		if ((SAFI_MPLS_VPN == safi)
-		    && (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
-
-			vpn_leak_to_vrf_withdraw(bgp, pi);
-		}
-
 
 		struct prefix_rd dummy_prd = {0};
 		bgp_bench_log_push(peer->bgp->bgp_bench_log,
@@ -5048,6 +5037,19 @@ int bgp_withdraw(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 					   .prefix = *p,
 					   .prefix_rd = prd ? *prd : dummy_prd
 				   });
+
+
+		bgp_rib_withdraw(dest, pi, peer, afi, safi, prd);
+		if (SAFI_UNICAST == safi
+		    && (bgp->inst_type == BGP_INSTANCE_TYPE_VRF
+			|| bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
+			vpn_leak_from_vrf_withdraw(bgp_get_default(), bgp, pi);
+		}
+		if ((SAFI_MPLS_VPN == safi)
+		    && (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT)) {
+
+			vpn_leak_to_vrf_withdraw(bgp, pi);
+		}
 
 	} else if (bgp_debug_update(peer, p, NULL, 1)) {
 		bgp_debug_rdpfxpath2str(afi, safi, prd, p, label, num_labels,
