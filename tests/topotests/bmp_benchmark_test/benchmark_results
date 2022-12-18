@@ -239,7 +239,7 @@ def plot_ram_usage(per_module_ram_usage):
             plot_data_stats(ax, data, data_label=lbl, median=True, mean=True, peak=True, with_line=False)
         ax.set_ylabel("Memory Usage (MB)")
         ax.set_xlabel("Time (s)")
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.3, 1))
         plt.title(make_plot_title(f"FRR Modules Memory Usage Monitoring\n w/o {' '.join(list(map(str, excepted)))}",
                                   len(labels), exp_duration_txt, "Timeseries"))
         render_plot(plt.gcf())
@@ -282,7 +282,7 @@ def plot_ram_usage(per_module_ram_usage):
     bins = scale_x_axis_for_duration(bins, exp_duration_s)
 
     plt.bar(bins, bmp_values * 1e-6, label="bmp module ram usage", color=plt_colors[1])
-    plt.legend()
+    plt.legend(bbox_to_anchor=(1.3, 0.6))
     plt.ylabel("Memory Usage (MB)")
     plt.xlabel("Time (s)")
     plt.title(make_plot_title("FRR BMP RAM Usage Monitoring", len(labels), exp_duration_txt, "Timeseries"))
@@ -309,7 +309,7 @@ def plot_ram_usage(per_module_ram_usage):
            )
     ax.set_ylabel("Memory Usage (MB)")
     ax.set_xlabel("Time (s)")
-    ax.legend()
+    ax.legend(bbox_to_anchor=(1.3, 0.6))
     plt.title(make_plot_title("FRR BGP+BMP+lmlogs Cumulative RAM Usage", len(labels), exp_duration_txt, "Timeseries"))
     render_plot(plt.gcf())
 
@@ -329,7 +329,7 @@ def plot_ram_usage(per_module_ram_usage):
     plot_data_stats(ax, bgpd_values_scaled, data_label="bgpd module", mean=True, peak=True, median=True)
     plot_data_stats(ax, bgpd_values_scaled + bmp_values_scaled, data_label="bmp module", mean=True, median=True,
                     peak=True)
-    ax.legend()
+    ax.legend(bbox_to_anchor=(1.3, 0.6))
     render_plot(plt.gcf())
 
     # plot logging system ram usage
@@ -347,7 +347,7 @@ def plot_ram_usage(per_module_ram_usage):
                         exp_duration_txt, "Timeseries"))
     axs_logmem_lineplot.set_xlabel("Time (s)")
     axs_logmem_lineplot.set_ylabel("Memory usage (bytes)")
-    axs_logmem_lineplot.legend()
+    axs_logmem_lineplot.legend(bbox_to_anchor=(1.3, 0.6))
     render_plot(fig_logmem_lineplot)
 
     # bmp usage repartition by memory types
@@ -359,7 +359,7 @@ def plot_ram_usage(per_module_ram_usage):
             for name, values in json_obj_split_series(result).items():
                 plt.plot(make_x_axis_for_timeseries(values, exp_duration_s), values, label=name)
 
-        plt.legend()
+        plt.legend(bbox_to_anchor=(1.3, 0.6))
         plt.title(
             make_plot_title("BMP Memory Use Repartition across datatypes", len(result), exp_duration_txt, "Timeseries"))
         plt.ylabel(_get_column_display_name(column_type))
@@ -372,7 +372,7 @@ def plot_ram_usage(per_module_ram_usage):
                            modules_types_sizes.items()}
 
     subplots_count = len(modules_types_sizes.keys())
-    fig, axs = plt.subplots(1, subplots_count, figsize=(6.4 * subplots_count, 4.8 * 1.5))
+    fig, axs = plt.subplots(1, subplots_count, figsize=(matplotlib.rcParams['figure.figsize'][0] * subplots_count, 1.5 * matplotlib.rcParams['figure.figsize'][1]))
     for i, (ax, (module, data)) in enumerate(zip(axs, modules_types_sizes.items())):
         data = [(name, int(size_str) if size_str.isnumeric() else 0) for (name, size_str) in data]
         data = list(zip(*sorted(data, reverse=True, key=lambda tup: tup[1])))
@@ -384,14 +384,14 @@ def plot_ram_usage(per_module_ram_usage):
         ax.set_title(f"{module} datatypes sizes")
         ax.set_ylabel("Size (bytes)")
         ax.set_xlabel("Datatype")
-        ax.legend()
+        ax.legend(bbox_to_anchor=(1.3, 0.6))
     render_plot(plt.gcf())
 
 
 def plot_cpu_usage(logs, matches):
     print("plotting cpu usage")
-    fig_cpu_lineplot, axs_cpu_lineplot = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
-    fig_hist, axs_hist = plt.subplots(len(logs), 1, figsize=(6.4, 2.5 * 4.8))
+    fig_cpu_lineplot, axs_cpu_lineplot = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
+    fig_hist, axs_hist = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
     for i, vrf_log in enumerate(logs):
         match = matches[i]
 
@@ -420,14 +420,14 @@ def plot_cpu_usage(logs, matches):
         axs_cpu_lineplot[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Timeseries"))
         axs_cpu_lineplot[i].set_xlabel("Time (s)")
         axs_cpu_lineplot[i].set_ylabel("Duration (ms)")
-        axs_cpu_lineplot[i].legend()
+        axs_cpu_lineplot[i].legend(bbox_to_anchor=(1.3, 0.6))
 
         # cpu delay histogram
         axs_hist[i].hist(np.array(cpu_delay) * 1e3, bins=50, label="cpu delay (ms)")
         axs_hist[i].set_title(make_plot_title(title, total_sample_count, total_time_spent_txt, "Histogram"))
         axs_hist[i].set_ylabel("Count")
         axs_hist[i].set_xlabel("Duration (ms)")
-        axs_hist[i].legend()
+        axs_hist[i].legend(bbox_to_anchor=(1.3, 0.6))
 
     render_plot(plt.gcf())
 
@@ -446,7 +446,7 @@ def type_to_char(entry_type):
 
 def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=10.):
     print("plotting gantt")
-    fig, axs = plt.subplots(len(logs), 1, figsize=(6.4 * fig_scale[0], fig_scale[1] * 4.8))
+    fig, axs = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0] * fig_scale[0], fig_scale[1] * matplotlib.rcParams['figure.figsize'][1]))
     for i, vrf_log in enumerate(logs):
         match = matches[i]
         if not match: continue
@@ -488,7 +488,7 @@ def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=
         # TODO map height to ingress peer_id
 
         legend_elements = [Line2D([], [], label=lbl, color=clr) for lbl, clr in series_settings.items()]
-        plt.legend(handles=legend_elements, )
+        plt.legend(bbox_to_anchor=(1.3, 0.6), handles=legend_elements)
 
         y = list(map(_get_height_for_prefix, prefix))
         axs[i].hlines(y, in_timestamp, out_timestamp, colors=color_mapper(pair_type), lw=2.5)
@@ -538,47 +538,47 @@ def render_plot(fig: matplotlib.figure.Figure):
     if dir and not os.path.exists(dir):
         os.makedirs(dir, exist_ok=True)
 
-    fig.savefig(out_path, format="svg")
+    fig.savefig(out_path, format="svg", bbox_inches="tight")
     plt.close(fig)
     plot_index += 1
 
 
-figscaling = 3
+figscaling = 10
 
 
 @ray.remote
 def _run_one(test_name_farg):
-	global test_name
-	test_name = test_name_farg
+    global test_name
+    test_name = test_name_farg
 
-	print(f"TEST {test_name}")
+    print(f"TEST {test_name}")
 
-	global plot_index
-	plot_index = 0
+    global plot_index
+    plot_index = 0
 
-	logs, ram_usage = load_files_from_router(test_name, "uut")
+    logs, ram_usage = load_files_from_router(test_name, "uut")
 
-	if len(ram_usage) > 0:
-	    per_module_ram_usage = json_obj_split_series(ram_usage)
-	    per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
-	    per_module_ram_usage.pop("usage")
-	else:
-	    dummy = {"total": -69, "details": []}
-	    per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
+    if len(ram_usage) > 0:
+        per_module_ram_usage = json_obj_split_series(ram_usage)
+        per_module_ram_usage = per_module_ram_usage | json_obj_split_series(per_module_ram_usage.get("usage"))
+        per_module_ram_usage.pop("usage")
+    else:
+        dummy = {"total": -69, "details": []}
+        per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
 
-	vrf_info = load_vrf_info(logs)
-	print("vrf infos: \n", vrf_info)
+    vrf_info = load_vrf_info(logs)
+    print("vrf infos: \n", vrf_info)
 
-	plot_ram_usage(per_module_ram_usage)
+    plot_ram_usage(per_module_ram_usage)
 
-	print("matching events")
+    print("matching events")
 
-#	matches = workers.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
-	matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
-	plot_cpu_usage(logs, matches)
-	plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
+    #	matches = workers.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
+    matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
+    plot_cpu_usage(logs, matches)
+    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
 
-	return 0
+    return 0
 
 
 def main():
@@ -602,8 +602,8 @@ def main():
     if test_name_arg != "*":
         ray.get(_run_one.remote(test_name_arg))
     else:
-#        print(workers)
-#        _ = workers.map(functools.partial(_run_one, workers=workers), test_names_arg_opts, chunksize=1)
+        #        print(workers)
+        #        _ = workers.map(functools.partial(_run_one, workers=workers), test_names_arg_opts, chunksize=1)
         _ = ray.get([_run_one.remote(x) for x in test_names_arg_opts])
 
 

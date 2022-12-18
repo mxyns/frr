@@ -236,7 +236,7 @@ def make_memusage_monitors(tgen, rnames, output_dir_format, freq=100.0):
         while topo_running_shared.value > 0:
             start = time.time()
             usage = get_router_ram_usages(rnode)
-            logger.info("adding {} values".format(len(usage.keys())))
+            # logger.info("adding {} values".format(len(usage.keys())))
             ram_usages.append({"timestamp": time.time_ns(), "usage": usage})
 
             # keep one good usage with most information possible
