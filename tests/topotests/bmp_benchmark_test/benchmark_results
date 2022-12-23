@@ -112,6 +112,7 @@ def match_events(vrf_info, vrf_log_json):
             events_all), None)
 
     if len(vrf_log_json.get("events")) == 0:
+        print("empty file")
         return []
 
     event_start, event_end, normalized_all = unzip_event_start_event_end(vrf_log_json)
@@ -128,13 +129,16 @@ def match_events(vrf_info, vrf_log_json):
 
     el_count = len(event_start)
     shard_size = 1000
-    shard_count = int(el_count / shard_size)
+    shard_count = int(el_count / shard_size) + 1
 
     def _extend(x, y):
         x.extend(y)
         return x
 
-    return functools.reduce(_extend, ray.get([mp_bigmap.remote(event_start, shard_start, shard_end, revent_end, rnormalized_all) for (shard_start, shard_end) in [(int(x*shard_size), int(min((x+1)*shard_size, el_count))) for x in range(shard_count)]]), [])
+    ranges = [(int(x*shard_size), int(min((x+1)*shard_size, el_count))) for x in range(shard_count)]
+    results = ray.get([mp_bigmap.remote(event_start, shard_start, shard_end, revent_end, rnormalized_all) for (shard_start, shard_end) in ranges])
+    return functools.reduce(_extend, results, [])
+
 
 # take [{"total": int, "details": []}]
 # get every mem_usage field in each event
@@ -388,11 +392,11 @@ def plot_ram_usage(per_module_ram_usage):
     render_plot(plt.gcf())
 
 
-def plot_cpu_usage(logs, matches):
+def plot_cpu_usage(logs_summary, matches):
     print("plotting cpu usage")
-    fig_cpu_lineplot, axs_cpu_lineplot = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
-    fig_hist, axs_hist = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
-    for i, vrf_log in enumerate(logs):
+    fig_cpu_lineplot, axs_cpu_lineplot = plt.subplots(len(logs_summary), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
+    fig_hist, axs_hist = plt.subplots(len(logs_summary), 1, figsize=(matplotlib.rcParams['figure.figsize'][0], 2.5 * matplotlib.rcParams['figure.figsize'][1]))
+    for i, vrf_log in enumerate(logs_summary):
         match = matches[i]
 
         # for each in/out msg match -> (in.timestamp, time_between(in, out))
@@ -412,8 +416,8 @@ def plot_cpu_usage(logs, matches):
 
         axs_cpu_lineplot[i].plot(make_x_axis_for_timeseries(cpu_delay, total_time_spent), cpu_delay,
                                  color=plt_colors[0], label='cpu latency (ms)')
-        plot_data_stats(axs_cpu_lineplot[i], cpu_delay, data_label="cpu latency (ms)", mean=True,
-                        median=True, peak=True)
+        # plot_data_stats(axs_cpu_lineplot[i], cpu_delay, data_label="cpu latency (ms)", mean=True,
+        #                 median=True, peak=True)
 
         # titles & styling
         title = f"VRF {vrf_log['vrf']} {vrf_log['vrf_name']}\nFRR Daemons Update/Withdraw Processing Delay"
@@ -446,10 +450,10 @@ def type_to_char(entry_type):
     }.get(entry_type)
 
 
-def plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(2., 2.), tick_scale=10.):
+def plot_prefixes_gantt(logs_summary, matches, vrf_info, fig_scale=(2., 2.), tick_scale=10.):
     print("plotting gantt")
-    fig, axs = plt.subplots(len(logs), 1, figsize=(matplotlib.rcParams['figure.figsize'][0] * fig_scale[0], fig_scale[1] * matplotlib.rcParams['figure.figsize'][1]))
-    for i, vrf_log in enumerate(logs):
+    fig, axs = plt.subplots(len(logs_summary), 1, figsize=(matplotlib.rcParams['figure.figsize'][0] * fig_scale[0], fig_scale[1] * matplotlib.rcParams['figure.figsize'][1]))
+    for i, vrf_log in enumerate(logs_summary):
         match = matches[i]
         if not match: continue
 
@@ -548,8 +552,26 @@ def render_plot(fig: matplotlib.figure.Figure):
 figscaling = 10
 
 
+def save_matches_to_dir(logs_summary, matches, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    for i, log in enumerate(logs_summary):
+        with open(os.path.join(out_dir, f"processed_{log['router_id']}_{log['vrf']}"), "w") as f:
+            json.dump(matches[i], f)
+
+    with open(os.path.join(out_dir, "summary"), "w") as f:
+        json.dump(logs_summary, f)
+
+        
+def load_matches_from_dir(logs_summary, in_dir):
+    matches = [None] * len(logs_summary)
+    for i, log in enumerate(logs_summary):
+        with open(os.path.join(in_dir, f"processed_{log['router_id']}_{log['vrf']}")) as f:
+            matches[i] = json.load(f)
+
+    return matches
+
 @ray.remote
-def _run_one(test_name_farg):
+def _run_one(test_name_farg, processed_indir=None):
     global test_name
     test_name = test_name_farg
 
@@ -558,7 +580,9 @@ def _run_one(test_name_farg):
     global plot_index
     plot_index = 0
 
-    logs, ram_usage = load_files_from_router(test_name, "uut")
+    target_machine = "uut"
+    logs, ram_usage = load_files_from_router(test_name, target_machine)
+    logs_summary = [{k: log[k] for k in {"title", "router_id", "vrf", "vrf_name"}} for log in logs]
 
     if len(ram_usage) > 0:
         per_module_ram_usage = json_obj_split_series(ram_usage)
@@ -571,14 +595,17 @@ def _run_one(test_name_farg):
     vrf_info = load_vrf_info(logs)
     print("vrf infos: \n", vrf_info)
 
-    plot_ram_usage(per_module_ram_usage)
-
     print("matching events")
 
-    #	matches = workers.map(func=functools.partial(match_events, vrf_info=vrf_info), iterable=logs)
-    matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
-    plot_cpu_usage(logs, matches)
-    plot_prefixes_gantt(logs, matches, vrf_info, fig_scale=(3., 30.))
+    if not processed_indir:
+        matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
+        save_matches_to_dir(logs_summary, matches, os.path.join(CWD, "out", "processed", target_machine))
+    else:
+        matches = load_matches_from_dir(logs_summary, os.path.join(CWD, "out", "processed", target_machine))
+
+    plot_ram_usage(per_module_ram_usage)
+    plot_cpu_usage(logs_summary, matches)
+    plot_prefixes_gantt(logs_summary, matches, vrf_info, fig_scale=(3., 30.))
 
     return 0
 
@@ -594,19 +621,22 @@ def main():
     test_name_arg = sys.argv[1]
     test_names_arg_opts = os.listdir(os.path.join(CWD, "out", "logs"))
 
+    in_dir = len(sys.argv) > 2
+    print(f"Already Processed Input : {in_dir}")
+
     print(sys.argv, test_name_arg, ["*", *test_names_arg_opts])
     if test_name_arg not in ["*", *test_names_arg_opts]:
         opts = "\n".join(map(lambda x: f"- {x}", test_names_arg_opts))
         print(f"please specify a valid test_name from : \n{opts}")
         sys.exit(1)
 
+
+
     global test_name
     if test_name_arg != "*":
-        ray.get(_run_one.remote(test_name_arg))
+        ray.get(_run_one.remote(test_name_arg, in_dir))
     else:
-        #        print(workers)
-        #        _ = workers.map(functools.partial(_run_one, workers=workers), test_names_arg_opts, chunksize=1)
-        _ = ray.get([_run_one.remote(x) for x in test_names_arg_opts])
+        _ = ray.get([_run_one.remote(x, in_dir) for x in test_names_arg_opts])
 
 
 if __name__ == "__main__":

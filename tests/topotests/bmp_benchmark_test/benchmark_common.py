@@ -480,8 +480,6 @@ def test_connectivity(tgen):
     while not verify_bgp_convergence_from_running_config(tgen, uut):
         pass
 
-    time.sleep(3)
-
     # Show bgp sum for each vrf and bgp all
     def _show_all(router, vrfs=None):
         if vrfs is None:
