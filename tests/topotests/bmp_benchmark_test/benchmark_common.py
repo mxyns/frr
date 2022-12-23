@@ -294,6 +294,9 @@ def make_announcers(tgen, announcers, prefixes, normalize_slices, interval_ms, r
 
     def _send_prefixes_periodic(gear, prefixes, n, interval, pick_random: int = -1):
         # send_prefixes_announce_cmd(gear, prefixes, True)
+        send_prefixes_announce_cmd(gear, ["69.69.69.0/24"], True)
+        time.sleep(1)
+        send_prefixes_announce_cmd(gear, ["69.69.69.0/24"], False)
         time.sleep(interval / 1000)
 
         this_time_prefixes = prefixes

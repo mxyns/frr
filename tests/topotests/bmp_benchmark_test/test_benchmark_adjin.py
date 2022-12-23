@@ -30,8 +30,8 @@ def tgen(request):
 
     test_name = "adjin"
 
-    prefix_file_ipv4 = "prefixes/prefixes.json"
-    prefix_file_vpnv4 = "prefixes/prefixes_single.json"
+    prefix_file_ipv4 = "prefixes/ipv4_pfx.json"
+    prefix_file_vpnv4 = "prefixes/vpnv4_pfx.json"
 
 
     # Run test initialization function
@@ -51,12 +51,12 @@ def tgen(request):
             },
             "p1": {
                 TopoRouter.RD_BGP: {
-                    "prefixes": "prefixes/prefixes.json"
+                    "prefixes": prefix_file_ipv4
                 }
             },
             "ce1": {
                 TopoRouter.RD_BGP: {
-                    "prefixes": "prefixes/prefixes_single.json"
+                    "prefixes": prefix_file_vpnv4
                 }
             }
         }),

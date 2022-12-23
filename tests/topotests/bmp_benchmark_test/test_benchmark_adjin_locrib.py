@@ -29,8 +29,8 @@ def tgen(request):
 
     test_name = "adjin_locrib"
 
-    prefix_file_ipv4 = "prefixes/routeviews_prefixes_more_1M.json"
-    prefix_file_vpnv4 = "prefixes/routeviews_prefixes_more_500k.json"
+    prefix_file_ipv4 = "prefixes/ipv4_pfx.json"
+    prefix_file_vpnv4 = "prefixes/vpnv4_pfx.json"
 
     # Run test initialization function
     tgen, init_result = benchcom.init_test(request, ctx={
@@ -49,12 +49,12 @@ def tgen(request):
             },
             "p1": {
                 TopoRouter.RD_BGP: {
-                    "prefixes": "prefixes/routeviews_prefixes_more_1M.json"
+                    "prefixes": prefix_file_ipv4
                 }
             },
             "ce1": {
                 TopoRouter.RD_BGP: {
-                    "prefixes": "prefixes/routeviews_prefixes_more_500k.json"
+                    "prefixes": prefix_file_vpnv4
                 }
             }
         }),

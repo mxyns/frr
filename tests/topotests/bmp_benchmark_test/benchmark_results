@@ -552,16 +552,38 @@ def render_plot(fig: matplotlib.figure.Figure):
 figscaling = 10
 
 
+def save_ram_usage(ram_usage_raw, per_module_ram_usage, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(os.path.join(out_dir, "ram_usage_raw"), "w") as f:
+        json.dump(ram_usage_raw, f)
+        print(f"saved {f.name}")
+
+    with open(os.path.join(out_dir, "per_module_ram_usage"), "w") as f:
+        json.dump(per_module_ram_usage, f)
+        print(f"saved {f.name}")
+
+
+def save_vrf_info(vrf_info, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+
+    with open(os.path.join(out_dir, "vrf_info"), "w") as f:
+        json.dump(vrf_info, f)
+        print(f"saved {f.name}")
+
+
 def save_matches_to_dir(logs_summary, matches, out_dir):
     os.makedirs(out_dir, exist_ok=True)
     for i, log in enumerate(logs_summary):
         with open(os.path.join(out_dir, f"processed_{log['router_id']}_{log['vrf']}"), "w") as f:
             json.dump(matches[i], f)
+            print(f"saved {f.name}")
 
     with open(os.path.join(out_dir, "summary"), "w") as f:
         json.dump(logs_summary, f)
+        print(f"saved {f.name}")
 
-        
+
 def load_matches_from_dir(logs_summary, in_dir):
     matches = [None] * len(logs_summary)
     for i, log in enumerate(logs_summary):
@@ -571,7 +593,7 @@ def load_matches_from_dir(logs_summary, in_dir):
     return matches
 
 @ray.remote
-def _run_one(test_name_farg, processed_indir=None):
+def _run_one(test_name_farg, processed_indir=None, do_plot=False):
     global test_name
     test_name = test_name_farg
 
@@ -581,6 +603,8 @@ def _run_one(test_name_farg, processed_indir=None):
     plot_index = 0
 
     target_machine = "uut"
+    processed_output_dir = os.path.join(CWD, "out", "processed", target_machine)
+
     logs, ram_usage = load_files_from_router(test_name, target_machine)
     logs_summary = [{k: log[k] for k in {"title", "router_id", "vrf", "vrf_name"}} for log in logs]
 
@@ -592,20 +616,25 @@ def _run_one(test_name_farg, processed_indir=None):
         dummy = {"total": -69, "details": []}
         per_module_ram_usage = {"timestamp": [0], "bmp": [dummy], "bgpd": [dummy], "lmlogs": [dummy]}
 
+    save_ram_usage(ram_usage, per_module_ram_usage, processed_output_dir)
+
     vrf_info = load_vrf_info(logs)
     print("vrf infos: \n", vrf_info)
+    save_vrf_info(vrf_info, processed_output_dir)
+
 
     print("matching events")
 
     if not processed_indir:
         matches = ray.get([match_events.remote(vrf_log_json=x, vrf_info=vrf_info) for x in logs])
-        save_matches_to_dir(logs_summary, matches, os.path.join(CWD, "out", "processed", target_machine))
+        save_matches_to_dir(logs_summary, matches, processed_output_dir)
     else:
-        matches = load_matches_from_dir(logs_summary, os.path.join(CWD, "out", "processed", target_machine))
+        matches = load_matches_from_dir(logs_summary, processed_output_dir)
 
-    plot_ram_usage(per_module_ram_usage)
-    plot_cpu_usage(logs_summary, matches)
-    plot_prefixes_gantt(logs_summary, matches, vrf_info, fig_scale=(3., 30.))
+    if do_plot:
+        plot_ram_usage(per_module_ram_usage)
+        plot_cpu_usage(logs_summary, matches)
+        plot_prefixes_gantt(logs_summary, matches, vrf_info, fig_scale=(3., 30.))
 
     return 0
 
@@ -618,11 +647,17 @@ def main():
         print("please specify name of the test to load logs from")
         sys.exit(1)
 
-    test_name_arg = sys.argv[1]
-    test_names_arg_opts = os.listdir(os.path.join(CWD, "out", "logs"))
+    input_dir = os.path.join(CWD, "out", "logs")
+    os.makedirs(input_dir, exist_ok=True)
 
-    in_dir = len(sys.argv) > 2
-    print(f"Already Processed Input : {in_dir}")
+    test_name_arg = sys.argv[1]
+    test_names_arg_opts = os.listdir(input_dir)
+
+    do_plot_arg = bool(sys.argv[2]) if len(sys.argv) > 2 else False
+    print(f"Will Make Plots : {do_plot_arg}")
+
+    in_dir_arg = bool(sys.argv[3]) if len(sys.argv) > 3 else False
+    print(f"Already Processed Input : {in_dir_arg}")
 
     print(sys.argv, test_name_arg, ["*", *test_names_arg_opts])
     if test_name_arg not in ["*", *test_names_arg_opts]:
@@ -634,9 +669,9 @@ def main():
 
     global test_name
     if test_name_arg != "*":
-        ray.get(_run_one.remote(test_name_arg, in_dir))
+        ray.get(_run_one.remote(test_name_arg, in_dir_arg, do_plot_arg))
     else:
-        _ = ray.get([_run_one.remote(x, in_dir) for x in test_names_arg_opts])
+        _ = ray.get([_run_one.remote(x, in_dir_arg, do_plot_arg) for x in test_names_arg_opts])
 
 
 if __name__ == "__main__":
