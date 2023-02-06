@@ -86,7 +86,7 @@ DEFINE_HOOK(bgp_rpki_prefix_status,
 	    (peer, attr, prefix));
 
 DEFINE_HOOK(bgp_route_update,
-	    (struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
+	    (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
 	     struct bgp_path_info *old_route, struct bgp_path_info *new_route),
 	    (bgp, afi, safi, bn, old_route, new_route));
 
