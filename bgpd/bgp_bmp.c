@@ -1856,6 +1856,9 @@ static void bmp_close(struct bmp *bmp)
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
 			XFREE(MTYPE_BMP_QUEUE, bqe);
+	while ((bqe = bmp_pull_out(bmp)))
+		if (!bqe->refcount)
+			XFREE(MTYPE_BMP_QUEUE, bqe);
 
 	EVENT_OFF(bmp->t_read);
 	pullwr_del(bmp->pullwr);
