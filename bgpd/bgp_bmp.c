@@ -1272,6 +1272,31 @@ static inline struct bmp_queue_entry *bmp_pull_out(struct bmp *bmp)
 				   &bmp->mon_out_queuepos);
 }
 
+struct rib_out_pre_updgrp_walkctx {
+	struct bmp *bmp;
+	struct bmp_queue_entry *bqe;
+	struct prefix_rd *prd;
+	struct attr *attr;
+};
+static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp, void *hidden_ctx) {
+
+
+	struct rib_out_pre_updgrp_walkctx *ctx = (struct rib_out_pre_updgrp_walkctx *)hidden_ctx;
+
+	struct update_subgroup *subgrp;
+	struct peer_af *paf;
+	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O,
+				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &ctx->bqe->p, ctx->prd,
+				    ctx->attr, SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
+				    monotime(NULL));
+		}
+	}
+
+	return HASHWALK_CONTINUE;
+};
+
 /* TODO BMP_MON_LOCRIB find a way to merge properly this function with
  * bmp_wrqueue_in or abstract it if possible
  */
@@ -1347,6 +1372,18 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		    bpi ? bpi->attr : NULL, afi, safi,
 		    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
 				      : (time_t)(-1L));
+
+	struct rib_out_pre_updgrp_walkctx walkctx = {
+		.bmp = bmp,
+		.bqe = bqe,
+		.attr = bpi ? bpi->attr : NULL,
+		.prd = prd
+	};
+	if (bmp->targets->bgp->update_groups[afindex(afi, safi)]) {
+		update_group_af_walk(bmp->targets->bgp, afi, safi, bmp_monitor_rib_out_pre_updgrp_walkcb, (struct rib_out_pre_updgrp_walkctx *)&walkctx);
+	}
+
+
 	written = true;
 
 out:
