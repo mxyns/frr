@@ -12,6 +12,7 @@
 #include "pullwr.h"
 #include "qobj.h"
 #include "resolver.h"
+#include "bgp_updgrp.h"
 
 #define BMP_VERSION_3	3
 
@@ -124,8 +125,10 @@ struct bmp {
 	 * ahead we need to make sure that refcount is decremented.  Also, on
 	 * disconnects we need to walk the queue and drop our reference.
 	 */
-	struct bmp_queue_entry *locrib_queuepos;
-	struct bmp_queue_entry *queuepos;
+	struct bmp_queue_entry *mon_in_queuepos;
+	struct bmp_queue_entry *mon_loc_queuepos;
+	struct bmp_queue_entry *mon_out_queuepos;
+
 	struct bmp_mirrorq *mirrorpos;
 	bool mirror_lost;
 
@@ -236,11 +239,14 @@ struct bmp_targets {
 	struct thread *t_stats;
 	struct bmp_session_head sessions;
 
-	struct bmp_qhash_head updhash;
-	struct bmp_qlist_head updlist;
+	struct bmp_qhash_head mon_in_updhash;
+	struct bmp_qlist_head mon_in_updlist;
 
-	struct bmp_qhash_head locupdhash;
-	struct bmp_qlist_head locupdlist;
+	struct bmp_qhash_head mon_loc_updhash;
+	struct bmp_qlist_head mon_loc_updlist;
+
+	struct bmp_qhash_head mon_out_updhash;
+	struct bmp_qlist_head mon_out_updlist;
 
 	uint64_t cnt_accept, cnt_aclrefused;
 

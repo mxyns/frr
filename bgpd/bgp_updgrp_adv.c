@@ -36,6 +36,11 @@
 #include "bgpd/bgp_advertise.h"
 #include "bgpd/bgp_addpath.h"
 
+DEFINE_HOOK(bgp_adj_out_updated,
+	     (struct bgp_dest *dest,
+	      struct update_subgroup *subgrp, struct attr *attr,
+	      struct bgp_path_info *path, bool withdraw),
+	     (dest, subgrp, attr, path, withdraw));
 
 /********************
  * PRIVATE FUNCTIONS
@@ -59,7 +64,7 @@ static int bgp_adj_out_compare(const struct bgp_adj_out *o1,
 }
 RB_GENERATE(bgp_adj_out_rb, bgp_adj_out, adj_entry, bgp_adj_out_compare);
 
-static inline struct bgp_adj_out *adj_lookup(struct bgp_dest *dest,
+inline struct bgp_adj_out *adj_lookup(struct bgp_dest *dest,
 					     struct update_subgroup *subgrp,
 					     uint32_t addpath_tx_id)
 {
@@ -544,6 +549,8 @@ void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 	bgp_adv_fifo_add_tail(&subgrp->sync->update, adv);
 
 	subgrp->version = MAX(subgrp->version, dest->version);
+
+	hook_call(bgp_adj_out_updated, dest, subgrp, attr, path, false);
 }
 
 /* The only time 'withdraw' will be false is if we are sending
@@ -602,6 +609,8 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 	}
 
 	subgrp->version = MAX(subgrp->version, dest->version);
+
+	hook_call(bgp_adj_out_updated, dest, subgrp, NULL, NULL, withdraw);
 }
 
 void bgp_adj_out_remove_subgroup(struct bgp_dest *dest, struct bgp_adj_out *adj,
