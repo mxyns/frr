@@ -24,6 +24,7 @@
 #include "lib/version.h"
 #include "jhash.h"
 #include "termtable.h"
+#include "time.h"
 
 #include "bgpd/bgp_table.h"
 #include "bgpd/bgpd.h"
@@ -60,8 +61,39 @@ DEFINE_MTYPE_STATIC(BMP, BMP,		"BMP instance state");
 DEFINE_MTYPE_STATIC(BMP, BMP_MIRRORQ,	"BMP route mirroring buffer");
 DEFINE_MTYPE_STATIC(BMP, BMP_PEER,	"BMP per BGP peer data");
 DEFINE_MTYPE_STATIC(BMP, BMP_OPEN,	"BMP stored BGP OPEN message");
+DEFINE_MTYPE_STATIC(BMP, BMP_LBPI, "BMP locked BPI");
 
 DEFINE_QOBJ_TYPE(bmp_targets);
+
+static struct timeval bmp_startup_time = {0};
+
+static uint32_t bmp_time_since_startup(struct timeval *delay)
+{
+
+	if (bmp_startup_time.tv_sec == 0 && bmp_startup_time.tv_usec == 0) {
+		zlog_info("bmp [%s]: Startup time not recorded", __func__);
+		return 0;
+	}
+
+	uint32_t micros = (uint32_t)(monotime_since(&bmp_startup_time, delay));
+
+	return micros / 1000;
+}
+
+static const char *bmp_state_str(enum BMP_State state)
+{
+	switch (state) {
+
+	case BMP_StartupIdle:
+		return "Startup-Wait";
+	case BMP_PeerUp:
+		return "Peer-Up";
+	case BMP_Run:
+		return "Running";
+	default:
+		return "Unknown";
+	}
+}
 
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
 {
@@ -100,6 +132,110 @@ DECLARE_HASH(bmp_peerh, struct bmp_bgp_peer, bpi,
 		bmp_bgp_peer_cmp, bmp_bgp_peer_hash);
 
 struct bmp_peerh_head bmp_peerh;
+
+static int bmp_bpi_lock_cmp(const struct bmp_bpi_lock *a,
+			    const struct bmp_bpi_lock *b)
+{
+	if (a->locked < b->locked)
+		return -1;
+	if (a->locked > b->locked)
+		return 1;
+	return 0;
+}
+
+static uint32_t bmp_bpi_lock_hash(const struct bmp_bpi_lock *e)
+{
+	return jhash(&e->locked, sizeof(e->locked), 0x55aa5a5a);
+}
+
+DECLARE_HASH(bmp_lbpi, struct bmp_bpi_lock, lbpi, bmp_bpi_lock_cmp,
+	     bmp_bpi_lock_hash);
+
+struct bmp_lbpi_head bmp_lbpi;
+
+static struct bmp_bpi_lock *bmp_lock_bpi(struct bgp_path_info *bpi)
+{
+
+	if (!bpi)
+		return NULL;
+
+	struct bmp_bpi_lock dummy = {.locked = bpi}, *lbpi_ptr;
+
+	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
+	if (!lbpi_ptr) {
+		lbpi_ptr = XCALLOC(MTYPE_BMP_LBPI, sizeof(struct bmp_bpi_lock));
+		SET_FLAG(bpi->flags, BGP_BMP_HELD);
+		lbpi_ptr->locked = bpi;
+		lbpi_ptr->lock = 0;
+		bgp_path_info_lock(lbpi_ptr->locked);
+		bmp_lbpi_add(&bmp_lbpi, lbpi_ptr);
+	}
+
+	lbpi_ptr->lock++;
+
+	return lbpi_ptr;
+}
+
+static int bmp_mainlock_bpi(struct bgp_path_info *bpi)
+{
+
+	if (!bpi)
+		return -1;
+	struct bmp_bpi_lock *lbpi = bmp_lock_bpi(bpi);
+	lbpi->main = 1;
+	lbpi->lock--;
+
+
+	return 1;
+}
+
+static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi)
+{
+
+	if (!bpi)
+		return NULL;
+
+	struct bmp_bpi_lock dummy = {.locked = bpi}, *lbpi_ptr;
+
+	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
+
+	if (!lbpi_ptr)
+		return NULL;
+
+	lbpi_ptr->lock--;
+
+	if (lbpi_ptr->lock-- <= 0 && lbpi_ptr->main == 0) {
+		bgp_path_info_unlock(lbpi_ptr->locked);
+		bmp_lbpi_del(&bmp_lbpi, lbpi_ptr);
+		UNSET_FLAG(bpi->flags, BGP_BMP_HELD);
+		XFREE(MTYPE_BMP_LBPI, lbpi_ptr);
+		return NULL;
+	}
+
+	return lbpi_ptr;
+}
+
+
+static inline void bmp_bqe_free(struct bmp_queue_entry *bqe)
+{
+
+	if (!bqe)
+		return;
+	if (bqe->locked_bpi)
+		bmp_unlock_bpi(bqe->locked_bpi);
+
+	XFREE(MTYPE_BMP_QUEUE, bqe);
+}
+
+static int bmp_mainunlock_bpi(struct bgp_path_info *bpi)
+{
+
+	struct bmp_bpi_lock dummy = {.locked = bpi}, *lbpi_ptr;
+
+	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
+
+	return lbpi_ptr ? lbpi_ptr->main = 0 : -1;
+}
 
 DECLARE_LIST(bmp_mirrorq, struct bmp_mirrorq, bmi);
 
@@ -298,6 +434,7 @@ static void bmp_per_peer_hdr(struct stream *s, struct bgp *bgp,
 #define BMP_PEER_FLAG_V (1 << 7)
 #define BMP_PEER_FLAG_L (1 << 6)
 #define BMP_PEER_FLAG_A (1 << 5)
+#define BMP_PEER_FLAG_O (1 << 4)
 
 	bool is_locrib = peer_type_flag == BMP_PEER_TYPE_LOC_RIB_INSTANCE;
 
@@ -705,6 +842,9 @@ static void bmp_wrmirror_lost(struct bmp *bmp, struct pullwr *pullwr)
 	stream_free(s);
 }
 
+
+/* pulls a bmq and sends a bmp mirror message on the session
+ */
 static bool bmp_wrmirror(struct bmp *bmp, struct pullwr *pullwr)
 {
 	struct bmp_mirrorq *bmq;
@@ -752,6 +892,10 @@ out:
 	return written;
 }
 
+
+/* triggered when a bgp packet is sent
+ * saves the packet if the packet was a bgp open
+ */
 static int bmp_outgoing_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 		struct stream *packet)
 {
@@ -769,6 +913,10 @@ static int bmp_outgoing_packet(struct peer *peer, uint8_t type, bgp_size_t size,
 	return 0;
 }
 
+
+/* triggered when a bgp peer goes up
+ * sends a bmp peer up to all bmp peers and saves the bgp open packet
+ */
 static int bmp_peer_status_changed(struct peer *peer)
 {
 	struct bmp_bgp *bmpbgp = bmp_bgp_find(peer->bgp);
@@ -817,6 +965,9 @@ static int bmp_peer_status_changed(struct peer *peer)
 	return 0;
 }
 
+/* triggered when a bgp peer goes down
+ * sends a bmp peer down to all bmp peers and free the saved bgp open packet
+ */
 static int bmp_peer_backward(struct peer *peer)
 {
 	struct bmp_bgp *bmpbgp = bmp_bgp_find(peer->bgp);
@@ -839,6 +990,10 @@ static int bmp_peer_backward(struct peer *peer)
 	return 0;
 }
 
+
+/* sends a bmp end-of-rib on the bmp session for the given afi/safi
+ * for each peer
+ */
 static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 		    uint8_t peer_type_flag)
 {
@@ -908,6 +1063,8 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 	stream_free(s);
 }
 
+/* makes a bgp update to be embedded in a bmp monitoring message
+ */
 static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 				 struct peer *peer, struct attr *attr,
 				 afi_t afi, safi_t safi)
@@ -958,6 +1115,8 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 	return s;
 }
 
+/* makes a bgp withdraw to be embedded in a bmp monitoring message
+ */
 static struct stream *bmp_withdraw(const struct prefix *p,
 				   struct prefix_rd *prd, afi_t afi,
 				   safi_t safi)
@@ -999,6 +1158,8 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 	return s;
 }
 
+/* sends a bmp monitoring message using the given information on the bmp session
+ */
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 			uint8_t peer_type_flag, const struct prefix *p,
 			struct prefix_rd *prd, struct attr *attr, afi_t afi,
@@ -1039,6 +1200,145 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	stream_free(msg);
 }
 
+
+struct rib_out_pre_updgrp_walkctx {
+	struct bmp *bmp;
+	const struct prefix *pfx;
+	struct bgp_dest *dest;
+	struct bgp_path_info *bpi;
+	struct prefix_rd *prd;
+	struct attr *attr;
+	bool *written_ref;
+};
+
+static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
+						 void *hidden_ctx)
+{
+
+
+	struct rib_out_pre_updgrp_walkctx *ctx =
+		(struct rib_out_pre_updgrp_walkctx *)hidden_ctx;
+
+	struct update_subgroup *subgrp;
+	struct peer_af *paf;
+	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
+
+		struct attr dummy_attr = {0};
+		if (!subgroup_announce_check(ctx->dest, ctx->bpi, subgrp,
+					     ctx->pfx, &dummy_attr, NULL,
+					     BGP_ANNCHK_SPECIAL_PREPOLICY))
+			continue;
+
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O,
+				    BMP_PEER_TYPE_GLOBAL_INSTANCE,
+                    bgp_dest_get_prefix(ctx->dest), ctx->prd, ctx->attr,
+				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
+				    monotime(NULL));
+
+			*ctx->written_ref = true;
+		}
+	}
+
+	return HASHWALK_CONTINUE;
+};
+
+/* only for bmp sync */
+static inline bool bmp_monitor_rib_out_pre_walk(struct bmp *bmp, afi_t afi,
+						safi_t safi, const struct prefix *pfx,
+						struct bgp_dest *dest,
+						struct bgp_path_info *bpi,
+						struct attr *attr,
+						struct prefix_rd *prd)
+{
+	bool written = false;
+	struct rib_out_pre_updgrp_walkctx walkctx = {.bmp = bmp,
+						     .pfx = pfx,
+						     .dest = dest ? dest
+								  : bpi->net,
+						     .bpi = bpi,
+						     .attr = attr,
+						     .prd = prd,
+						     .written_ref = &written};
+
+	update_group_af_walk(bmp->targets->bgp, afi, safi,
+			     bmp_monitor_rib_out_pre_updgrp_walkcb,
+			     (void *)&walkctx);
+
+	return written;
+}
+
+struct rib_out_post_updgrp_walkctx {
+	struct bmp *bmp;
+	const struct prefix *pfx;
+	struct bgp_dest *dest;
+	struct prefix_rd *prd;
+	bool *written_ref;
+};
+
+/* only for bmp sync */
+static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp,
+						  void *hidden_ctx)
+{
+
+
+	struct rib_out_post_updgrp_walkctx *ctx =
+		(struct rib_out_post_updgrp_walkctx *)hidden_ctx;
+
+	struct update_subgroup *subgrp;
+	struct peer_af *paf;
+	struct bgp_adj_out *adj;
+	struct attr *advertised_attr;
+
+	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
+
+		adj = adj_lookup(ctx->dest, subgrp, 0);
+
+		if (!adj)
+			continue;
+
+		advertised_attr = !adj->adv	  ? adj->attr
+				  : adj->adv->baa ? adj->adv->baa->attr
+						  : NULL;
+
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			bmp_monitor(ctx->bmp, PAF_PEER(paf),
+				    BMP_PEER_FLAG_O | BMP_PEER_FLAG_L,
+				    BMP_PEER_TYPE_GLOBAL_INSTANCE, ctx->pfx,
+				    ctx->prd, advertised_attr,
+				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
+				    monotime(NULL));
+
+			*ctx->written_ref = true;
+		}
+	}
+
+	return HASHWALK_CONTINUE;
+};
+
+static inline bool bmp_monitor_rib_out_post_walk(struct bmp *bmp, afi_t afi,
+						 safi_t safi,
+						 const struct prefix *pfx,
+						 struct bgp_dest *dest,
+						 struct prefix_rd *prd)
+{
+	bool written = false;
+	struct rib_out_post_updgrp_walkctx walkctx = {.bmp = bmp,
+						      .pfx = pfx,
+						      .dest = dest,
+						      .prd = prd,
+						      .written_ref = &written};
+
+	update_group_af_walk(bmp->targets->bgp, afi, safi,
+			     bmp_monitor_rib_out_post_updgrp_walkcb,
+			     (void *)&walkctx);
+
+
+	return written;
+}
+
+/* does the bmp initial rib synchronization
+ */
 static bool bmp_wrsync(struct bmp *bmp, struct pullwr *pullwr)
 {
 	afi_t afi;
@@ -1139,12 +1439,28 @@ afibreak:
 						bmp->remote, afi2str(afi),
 						safi2str(safi));
 
-				bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_L,
-					BMP_PEER_TYPE_GLOBAL_INSTANCE);
-				bmp_eor(bmp, afi, safi, 0,
-					BMP_PEER_TYPE_GLOBAL_INSTANCE);
-				bmp_eor(bmp, afi, safi, 0,
-					BMP_PEER_TYPE_LOC_RIB_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+					       BMP_MON_IN_PREPOLICY))
+					bmp_eor(bmp, afi, safi, 0,
+						BMP_PEER_TYPE_GLOBAL_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+					       BMP_MON_IN_POSTPOLICY))
+					bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_L,
+						BMP_PEER_TYPE_GLOBAL_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+					       BMP_MON_LOC_RIB))
+					bmp_eor(bmp, afi, safi, 0,
+						BMP_PEER_TYPE_LOC_RIB_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+					       BMP_MON_OUT_PREPOLICY))
+					bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_O,
+						BMP_PEER_TYPE_GLOBAL_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+					       BMP_MON_OUT_POSTPOLICY))
+					bmp_eor(bmp, afi, safi,
+						BMP_PEER_FLAG_O |
+							BMP_PEER_FLAG_L,
+						BMP_PEER_TYPE_GLOBAL_INSTANCE);
 
 				bmp->afistate[afi][safi] = BMP_AFI_LIVE;
 				bmp->syncafi = AFI_MAX;
@@ -1156,9 +1472,9 @@ afibreak:
 		}
 
 		if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
-			       BMP_MON_POSTPOLICY) ||
-		    CHECK_FLAG(bmp->targets->afimon[afi][safi],
-			       BMP_MON_LOC_RIB)) {
+			       BMP_MON_IN_POSTPOLICY | BMP_MON_LOC_RIB |
+				       BMP_MON_OUT_PREPOLICY |
+				       BMP_MON_OUT_POSTPOLICY)) {
 			for (bpiter = bgp_dest_get_bgp_path_info(bn); bpiter;
 			     bpiter = bpiter->next) {
 				if (!CHECK_FLAG(bpiter->flags,
@@ -1176,7 +1492,7 @@ afibreak:
 			}
 		}
 		if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
-			       BMP_MON_PREPOLICY)) {
+			       BMP_MON_IN_PREPOLICY)) {
 			for (adjiter = bn->adj_in; adjiter;
 			     adjiter = adjiter->next) {
 				if (adjiter->peer->qobj_node.nid
@@ -1214,30 +1530,62 @@ afibreak:
 	    (safi == SAFI_MPLS_VPN))
 		prd = (struct prefix_rd *)bgp_dest_get_prefix(bmp->syncrdpos);
 
+	bool written = false;
+
+	if (adjin) {
+		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
+			    bn_p, prd, adjin->attr, afi, safi, adjin->uptime);
+		written = true;
+	}
+
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_IN_POSTPOLICY)) {
+		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
+			    afi, safi, bpi->uptime);
+		written = true;
+	}
+
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
 	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB)) {
 		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    bn_p, prd, bpi->attr, afi, safi,
 			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
 					      : (time_t)(-1L));
+		written = true;
 	}
 
-	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
-	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_POSTPOLICY))
-		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
-			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
-			    afi, safi, bpi->uptime);
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_PREPOLICY)) {
+		written |= bmp_monitor_rib_out_pre_walk(
+			bmp, afi, safi, bgp_dest_get_prefix(bn), bn, bpi, bpi->attr, prd);
+	}
 
-	if (adjin)
-		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    bn_p, prd, adjin->attr, afi, safi, adjin->uptime);
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_POSTPOLICY)) {
+		written |= bmp_monitor_rib_out_post_walk(bmp, afi, safi, bgp_dest_get_prefix(bn),
+							 bn, prd);
+	}
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
 
-	return true;
+	/* if we got here and nothing is written it means this specific
+	 * destination had no monitoring configured or configured monitoring
+	 * had nothing to send. we need to bump for wrsync to be called for the
+	 * following destinations in the table
+	 */
+	if (!written)
+		pullwr_bump(bmp->pullwr);
+
+	return written;
 }
 
+/* pulls a bqe from a given list
+ */
 static struct bmp_queue_entry *
 bmp_pull_from_queue(struct bmp_qlist_head *list, struct bmp_qhash_head *hash,
 		    struct bmp_queue_entry **queuepos_ptr)
@@ -1258,25 +1606,75 @@ bmp_pull_from_queue(struct bmp_qlist_head *list, struct bmp_qhash_head *hash,
 	return bqe;
 }
 
-static inline struct bmp_queue_entry *bmp_pull(struct bmp *bmp)
+/* shortcut to pull a bqe from the rib-in pre/post queue
+ */
+static inline struct bmp_queue_entry *bmp_pull_ribin(struct bmp *bmp)
 {
-	return bmp_pull_from_queue(&bmp->targets->updlist,
-				   &bmp->targets->updhash, &bmp->queuepos);
+	return bmp_pull_from_queue(&bmp->targets->mon_in_updlist,
+				   &bmp->targets->mon_in_updhash,
+				   &bmp->mon_in_queuepos);
 }
 
+/* shortcut to pull a bqe from the loc-rib
+ */
 static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 {
-	return bmp_pull_from_queue(&bmp->targets->locupdlist,
-				   &bmp->targets->locupdhash,
-				   &bmp->locrib_queuepos);
+	return bmp_pull_from_queue(&bmp->targets->mon_loc_updlist,
+				   &bmp->targets->mon_loc_updhash,
+				   &bmp->mon_loc_queuepos);
 }
 
-/* TODO BMP_MON_LOCRIB find a way to merge properly this function with
- * bmp_wrqueue or abstract it if possible
+/* shortcut to pull a bqe from the rib-out pre/post queue
+ */
+static inline struct bmp_queue_entry *bmp_pull_ribout(struct bmp *bmp)
+{
+	return bmp_pull_from_queue(&bmp->targets->mon_out_updlist,
+				   &bmp->targets->mon_out_updhash,
+				   &bmp->mon_out_queuepos);
+}
+
+/* returns 1 if the prefix will be synced later
+ * it means that we do not need to send an update about this prefix
+ */
+static inline int bmp_prefix_will_sync(struct bmp *bmp, afi_t afi, safi_t safi,
+				       struct prefix *prefix)
+{
+
+	switch (bmp->afistate[afi][safi]) {
+	case BMP_AFI_INACTIVE:
+	case BMP_AFI_NEEDSYNC:
+		/* this afi will be synced later, wait for sync
+		 */
+		return 1;
+	case BMP_AFI_SYNC:
+		if (prefix_cmp(prefix, &bmp->syncpos) <= 0)
+			/* currently syncing but have already passed this
+			 * prefix => send it. */
+			return 0;
+
+		/* currently syncing & haven't reached this prefix yet
+		 * => it'll be sent as part of the table sync, no update here
+		 */
+
+		return 1;
+	case BMP_AFI_LIVE:
+		/* this afi has already been synced, send an update
+		 */
+		return 0;
+	}
+
+	return 0;
+}
+
+/* gets a bqe from the loc-rib queue and sends a bmp monitoring message for
+ * loc-rib (if configured)
+ * the messages use the first selected path found in rib matching the prefix
+ *
+ * TODO BMP_MON_LOCRIB find a way to merge properly this function with
+ * bmp_wrqueue_in or abstract it if possible
  */
 static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 {
-
 	struct bmp_queue_entry *bqe;
 	struct peer *peer;
 	struct bgp_dest *bn = NULL;
@@ -1292,24 +1690,9 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB))
 		goto out;
 
-	switch (bmp->afistate[afi][safi]) {
-	case BMP_AFI_INACTIVE:
-	case BMP_AFI_NEEDSYNC:
+	if (bmp_prefix_will_sync(bmp, afi, safi, &bqe->p))
 		goto out;
-	case BMP_AFI_SYNC:
-		if (prefix_cmp(&bqe->p, &bmp->syncpos) <= 0)
-			/* currently syncing but have already passed this
-			 * prefix => send it.
-			 */
-			break;
 
-		/* currently syncing & haven't reached this prefix yet
-		 * => it'll be sent as part of the table sync, no need here
-		 */
-		goto out;
-	case BMP_AFI_LIVE:
-		break;
-	}
 
 	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
 	if (!peer) {
@@ -1323,6 +1706,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		goto out;
 	}
 
+	/* retrieve info about the selected path
+	 */
 	bool is_vpn = (bqe->afi == AFI_L2VPN && bqe->safi == SAFI_EVPN) ||
 		      (bqe->safi == SAFI_MPLS_VPN);
 
@@ -1345,10 +1730,9 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
 				      : (time_t)(-1L));
 	written = true;
-
 out:
 	if (!bqe->refcount)
-		XFREE(MTYPE_BMP_QUEUE, bqe);
+		bmp_bqe_free(bqe);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -1356,35 +1740,26 @@ out:
 	return written;
 }
 
-static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
+/* gets a bqe from the rib-in pre/post queue and sends a bmp monitoring
+ * message to the peer for each configured monitoring feature about the
+ * first valid path found in rib for this prefix
+ */
+static bool bmp_wrqueue_in(struct bmp *bmp, struct pullwr *pullwr)
 {
 	struct bmp_queue_entry *bqe;
 	struct peer *peer;
 	struct bgp_dest *bn = NULL;
 	bool written = false;
 
-	bqe = bmp_pull(bmp);
+	bqe = bmp_pull_ribin(bmp);
 	if (!bqe)
 		return false;
 
 	afi_t afi = bqe->afi;
 	safi_t safi = bqe->safi;
 
-	switch (bmp->afistate[afi][safi]) {
-	case BMP_AFI_INACTIVE:
-	case BMP_AFI_NEEDSYNC:
+	if (bmp_prefix_will_sync(bmp, afi, safi, &bqe->p)) {
 		goto out;
-	case BMP_AFI_SYNC:
-		if (prefix_cmp(&bqe->p, &bmp->syncpos) <= 0)
-			/* currently syncing but have already passed this
-			 * prefix => send it. */
-			break;
-
-		/* currently syncing & haven't reached this prefix yet
-		 * => it'll be sent as part of the table sync, no need here */
-		goto out;
-	case BMP_AFI_LIVE:
-		break;
 	}
 
 	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
@@ -1402,7 +1777,22 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
 				  &bqe->p, prd);
 
-	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_POSTPOLICY)) {
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_PREPOLICY)) {
+		struct bgp_adj_in *adjin;
+
+		for (adjin = bn ? bn->adj_in : NULL; adjin;
+		     adjin = adjin->next) {
+			if (adjin->peer == peer)
+				break;
+		}
+		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
+			    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
+			    adjin ? adjin->uptime : monotime(NULL));
+		written = true;
+	}
+
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_IN_POSTPOLICY)) {
 		struct bgp_path_info *bpi;
 
 		for (bpi = bgp_dest_get_bgp_path_info(bn); bpi;
@@ -1420,23 +1810,9 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 		written = true;
 	}
 
-	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_PREPOLICY)) {
-		struct bgp_adj_in *adjin;
-
-		for (adjin = bn ? bn->adj_in : NULL; adjin;
-		     adjin = adjin->next) {
-			if (adjin->peer == peer)
-				break;
-		}
-		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
-			    adjin ? adjin->uptime : monotime(NULL));
-		written = true;
-	}
-
 out:
 	if (!bqe->refcount)
-		XFREE(MTYPE_BMP_QUEUE, bqe);
+		bmp_bqe_free(bqe);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -1444,9 +1820,117 @@ out:
 	return written;
 }
 
+/* gets a bqe from the rib-out post queue and sends a bmp rib-out
+ * pre/post-policy monitoring message to the peer
+ */
+static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
+{
+	struct bmp_queue_entry *bqe;
+	struct peer *peer;
+	struct bgp_dest *bn = NULL;
+	bool written = false;
+
+	bqe = bmp_pull_ribout(bmp);
+	if (!bqe)
+		return false;
+
+	afi_t afi = bqe->afi;
+	safi_t safi = bqe->safi;
+
+	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_POSTPOLICY | BMP_MON_OUT_PREPOLICY)) {
+		goto out;
+	}
+
+	if (bmp_prefix_will_sync(bmp, afi, safi, &bqe->p)) {
+		goto out;
+	}
+
+	peer = QOBJ_GET_TYPESAFE(bqe->peerid, peer);
+	if (!peer) {
+		zlog_info("bmp: skipping queued item for deleted peer");
+		goto out;
+	}
+
+	bool is_vpn = (bqe->afi == AFI_L2VPN && bqe->safi == SAFI_EVPN) ||
+		      (bqe->safi == SAFI_MPLS_VPN);
+
+	struct prefix_rd *prd = is_vpn ? &bqe->rd : NULL;
+
+	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
+				  &bqe->p, prd);
+
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_PREPOLICY) &&
+	    CHECK_FLAG(bqe->flags, BMP_MON_OUT_PREPOLICY)) {
+
+		struct bgp_path_info *bpi = bqe->locked_bpi;
+
+		if (!bpi) {
+			for (bpi = bgp_dest_get_bgp_path_info(bn);
+			     bpi; bpi = bpi->next)
+				if (CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED))
+					break;
+		}
+
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
+			    !bqe->locked_bpi && bpi ? bpi->attr : NULL, afi,
+			    safi, monotime(NULL));
+
+		written = true;
+	}
+
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_OUT_POSTPOLICY) &&
+	    CHECK_FLAG(bqe->flags, BMP_MON_OUT_POSTPOLICY)) {
+		struct bgp_adj_out *adj;
+		struct attr *advertised_attr;
+
+		adj = adj_lookup(bn, peer_subgroup(peer, afi, safi), 0);
+		advertised_attr = adj ? !adj->adv	  ? adj->attr
+					  : adj->adv->baa ? adj->adv->baa->attr
+							  : NULL
+				      : NULL;
+
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
+			    advertised_attr, afi, safi, monotime(NULL));
+
+		written = true;
+	}
+
+out:
+	if (!bqe->refcount)
+		bmp_bqe_free(bqe);
+
+	if (bn)
+		bgp_dest_unlock_node(bn);
+
+	return written;
+}
+
+/* called, when the socket is available, to retrieve data to send
+ */
 static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 {
+
+	uint32_t timeout_ms;
+	uint32_t startup_delay = bmp->targets->bmpbgp->startup_delay_ms;
 	switch(bmp->state) {
+	case BMP_StartupIdle:
+		if ((timeout_ms = bmp_time_since_startup(NULL)) <
+		    startup_delay) {
+			pullwr_timeout(pullwr, startup_delay - timeout_ms);
+			return;
+		}
+
+		zlog_info(
+			"bmp: Startup timeout expired, time since startup is %" PRIu32
+			"ms",
+			timeout_ms);
+		bmp->state = BMP_PeerUp;
+		// fall through
 	case BMP_PeerUp:
 		bmp_send_peerup(bmp);
 		bmp->state = BMP_Run;
@@ -1455,9 +1939,11 @@ static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 	case BMP_Run:
 		if (bmp_wrmirror(bmp, pullwr))
 			break;
-		if (bmp_wrqueue(bmp, pullwr))
+		if (bmp_wrqueue_in(bmp, pullwr))
 			break;
 		if (bmp_wrqueue_locrib(bmp, pullwr))
+			break;
+		if (bmp_wrqueue_ribout(bmp, pullwr))
 			break;
 		if (bmp_wrsync(bmp, pullwr))
 			break;
@@ -1477,10 +1963,19 @@ static void bmp_wrerr(struct bmp *bmp, struct pullwr *pullwr, bool eof)
 	bmp_free(bmp);
 }
 
+/* inserts a bmp_queue_entry in the updlist. overwrites any similar
+ * bmp_queue_entry in the list.
+ *
+ * returns the bqe inserted or NULL if ignored
+ *
+ * need to update correct queue pos for all sessions of the target after
+ * a call to this function
+ */
 static struct bmp_queue_entry *
 bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		struct bmp_qlist_head *updlist, struct bgp *bgp, afi_t afi,
-		safi_t safi, struct bgp_dest *bn, struct peer *peer)
+		safi_t safi, struct bgp_dest *bn, struct peer *peer,
+		uint8_t mon_flag, struct bgp_path_info *lock_bpi)
 {
 	struct bmp_queue_entry *bqe, bqeref;
 	size_t refcount;
@@ -1494,6 +1989,8 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 	bqeref.peerid = peer->qobj_node.nid;
 	bqeref.afi = afi;
 	bqeref.safi = safi;
+	bqeref.flags = mon_flag;
+	bqeref.locked_bpi = lock_bpi;
 
 	if ((afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest) ||
 	    (safi == SAFI_MPLS_VPN))
@@ -1502,8 +1999,17 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 
 	bqe = bmp_qhash_find(updhash, &bqeref);
 	if (bqe) {
+		SET_FLAG(bqe->flags, mon_flag);
+		/* swap locked bpis and un/lock pre/new bpis */
+		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
+			bmp_lock_bpi(lock_bpi);
+			bmp_unlock_bpi(bqe->locked_bpi);
+			bqe->locked_bpi = lock_bpi;
+		}
+
 		if (bqe->refcount >= refcount)
-			/* nothing to do here */
+			/* same update, not sent to anyone yet,
+			 * nothing to do here */
 			return NULL;
 
 		bmp_qlist_del(updlist, bqe);
@@ -1512,46 +2018,50 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		memcpy(bqe, &bqeref, sizeof(*bqe));
 
 		bmp_qhash_add(updhash, bqe);
+
+		if (lock_bpi)
+			bmp_lock_bpi(lock_bpi);
 	}
 
 	bqe->refcount = refcount;
 	bmp_qlist_add_tail(updlist, bqe);
 
 	return bqe;
-
-	/* need to update correct queue pos for all sessions of the target after
-	 * a call to this function
-	 */
 }
 
-static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
-		       struct bgp_dest *bn, struct peer *peer, bool withdraw)
+
+/* triggered when a change in adj-rib-in is detected.
+ * inserts a bqe to the adj-rib-in monitoring queue which will trigger a
+ * bmp monitoring message to be sent for adj-rib-in pre and/or post policy
+ * if enabled in config
+ */
+static int bmp_process_ribin(struct bgp *bgp, afi_t afi, safi_t safi,
+			     struct bgp_dest *bn, struct peer *peer,
+			     bool withdraw)
 {
 	struct bmp_bgp *bmpbgp = bmp_bgp_find(peer->bgp);
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
-	if (frrtrace_enabled(frr_bgp, bmp_process)) {
+	if (frrtrace_enabled(frr_bgp, bmp_process_ribin)) {
 		char pfxprint[PREFIX2STR_BUFFER];
 
 		prefix2str(&bn->rn->p, pfxprint, sizeof(pfxprint));
-		frrtrace(5, frr_bgp, bmp_process, peer, pfxprint, afi, safi,
-			 withdraw);
+		frrtrace(5, frr_bgp, bmp_process_ribin, peer, pfxprint, afi,
+			 safi, withdraw);
 	}
 
 	if (!bmpbgp)
 		return 0;
 
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
-		/* check if any monitoring is enabled (ignoring loc-rib since it
-		 * uses another hook & queue
-		 */
-		if (!CHECK_FLAG(bt->afimon[afi][safi], ~BMP_MON_LOC_RIB))
+		if (!CHECK_FLAG(bt->afimon[afi][safi],
+				BMP_MON_IN_PREPOLICY | BMP_MON_IN_POSTPOLICY))
 			continue;
 
-		struct bmp_queue_entry *last_item =
-			bmp_process_one(bt, &bt->updhash, &bt->updlist, bgp,
-					afi, safi, bn, peer);
+		struct bmp_queue_entry *last_item = bmp_process_one(
+			bt, &bt->mon_in_updhash, &bt->mon_in_updlist, bgp, afi,
+			safi, bn, peer, BMP_QUEUE_FLAGS_NONE, NULL);
 
 		/* if bmp_process_one returns NULL
 		 * we don't have anything to do next
@@ -1560,8 +2070,8 @@ static int bmp_process(struct bgp *bgp, afi_t afi, safi_t safi,
 			continue;
 
 		frr_each(bmp_session, &bt->sessions, bmp) {
-			if (!bmp->queuepos)
-				bmp->queuepos = last_item;
+			if (!bmp->mon_in_queuepos)
+				bmp->mon_in_queuepos = last_item;
 
 			pullwr_bump(bmp->pullwr);
 		}
@@ -1578,6 +2088,25 @@ static void bmp_stat_put_u32(struct stream *s, size_t *cnt, uint16_t type,
 	(*cnt)++;
 }
 
+static void bmp_stat_put_u64(struct stream *s, size_t *cnt, uint16_t type,
+			     uint64_t value)
+{
+	stream_putw(s, type);
+	stream_putw(s, 8);
+	stream_putq(s, value);
+	(*cnt)++;
+}
+
+static void bmp_stat_put_af_u64(struct stream *s, size_t *cnt, uint16_t type,
+				afi_t afi, safi_t safi, uint64_t value)
+{
+	stream_putw(s, type);
+	stream_putw(s, 2 + 1 + 8);
+	stream_put3(s, (afi_int2iana(afi) << 8) + safi_int2iana(safi));
+	stream_putq(s, value);
+	(*cnt)++;
+}
+
 static void bmp_stats(struct event *thread)
 {
 	struct bmp_targets *bt = EVENT_ARG(thread);
@@ -1585,6 +2114,12 @@ static void bmp_stats(struct event *thread)
 	struct peer *peer;
 	struct listnode *node;
 	struct timeval tv;
+	afi_t afi;
+	safi_t safi;
+
+	uint64_t af_stat[AFI_MAX][SAFI_MAX];
+	struct update_subgroup *subgrp;
+
 
 	if (bt->stat_msec)
 		event_add_timer_msec(bm->master, bmp_stats, bt, bt->stat_msec,
@@ -1595,6 +2130,7 @@ static void bmp_stats(struct event *thread)
 	/* Walk down all peers */
 	for (ALL_LIST_ELEMENTS_RO(bt->bgp->peer, node, peer)) {
 		size_t count = 0, count_pos, len;
+		uint64_t per_af_sum = 0;
 
 		if (!peer_established(peer->connection))
 			continue;
@@ -1609,16 +2145,61 @@ static void bmp_stats(struct event *thread)
 
 		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_REJECTED,
 				peer->stat_pfx_filter);
+		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_DUP_WITHDRAW,
+				 peer->stat_pfx_dup_withdraw);
+		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_CLUSTER,
+				 peer->stat_pfx_cluster_loop);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_ASPATH,
 				peer->stat_pfx_aspath_loop);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_ORIGINATOR,
-				peer->stat_pfx_originator_loop);
-		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_CLUSTER,
-				peer->stat_pfx_cluster_loop);
-		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_DUP_WITHDRAW,
-				peer->stat_pfx_dup_withdraw);
+				 peer->stat_pfx_originator_loop);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_7606_WITHDRAW,
 				peer->stat_upd_7606);
+
+#define BMP_PER_AF_STAT(afi_var, safi_var, af_stat_arr, sum_var, safi_stat,    \
+			safi_stat_call, sum_stat_call)                         \
+	do {                                                                   \
+		(sum_var) = 0;                                                 \
+		FOREACH_AFI_SAFI ((afi_var), (safi_var)) {                     \
+			(sum_var) += ((af_stat_arr)[(afi_var)][(safi_var)] =   \
+					      (safi_stat));                    \
+			if ((af_stat_arr)[(afi_var)][(safi_var)])              \
+				(safi_stat_call);                              \
+		};                                                             \
+		(sum_stat_call);                                               \
+	} while (0);
+
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			peer->stat_adj_in_count[afi][safi],
+			bmp_stat_put_af_u64(s, &count,
+					    BMP_STATS_SIZE_ADJ_RIB_IN_SAFI, afi,
+					    safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count, BMP_STATS_SIZE_ADJ_RIB_IN,
+					 per_af_sum));
+
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			peer->stat_loc_rib_count[afi][safi],
+			bmp_stat_put_af_u64(s, &count,
+					    BMP_STATS_SIZE_LOC_RIB_SAFI, afi,
+					    safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count, BMP_STATS_SIZE_LOC_RIB,
+					 per_af_sum));
+
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			((subgrp = peer_subgroup(peer, afi, safi))
+				 ? subgrp->pscount
+				 : 0),
+			bmp_stat_put_af_u64(
+				s, &count, BMP_STATS_SIZE_ADJ_RIB_OUT_POST_SAFI,
+				afi, safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count,
+					 BMP_STATS_SIZE_ADJ_RIB_OUT_POST,
+					 per_af_sum));
+
+
 		bmp_stat_put_u32(s, &count, BMP_STATS_FRR_NH_INVALID,
 				peer->stat_pfx_nh_invalid);
 
@@ -1726,7 +2307,7 @@ static struct bmp *bmp_open(struct bmp_targets *bt, int bmp_sock)
 	bmp = bmp_new(bt, bmp_sock);
 	strlcpy(bmp->remote, buf, sizeof(bmp->remote));
 
-	bmp->state = BMP_PeerUp;
+	bmp->state = BMP_StartupIdle;
 	bmp->pullwr = pullwr_new(bm->master, bmp_sock, bmp, bmp_wrfill,
 			bmp_wrerr);
 	event_add_read(bm->master, bmp_read, bmp, bmp_sock, &bmp->t_read);
@@ -1769,12 +2350,15 @@ static void bmp_close(struct bmp *bmp)
 	while ((bmq = bmp_pull_mirror(bmp)))
 		if (!bmq->refcount)
 			XFREE(MTYPE_BMP_MIRRORQ, bmq);
-	while ((bqe = bmp_pull(bmp)))
+	while ((bqe = bmp_pull_ribin(bmp)))
 		if (!bqe->refcount)
-			XFREE(MTYPE_BMP_QUEUE, bqe);
+			bmp_bqe_free(bqe);
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
-			XFREE(MTYPE_BMP_QUEUE, bqe);
+			bmp_bqe_free(bqe);
+	while ((bqe = bmp_pull_ribout(bmp)))
+		if (!bqe->refcount)
+			bmp_bqe_free(bqe);
 
 	EVENT_OFF(bmp->t_read);
 	pullwr_del(bmp->pullwr);
@@ -1798,6 +2382,7 @@ static struct bmp_bgp *bmp_bgp_get(struct bgp *bgp)
 	bmpbgp = XCALLOC(MTYPE_BMP, sizeof(*bmpbgp));
 	bmpbgp->bgp = bgp;
 	bmpbgp->mirror_qsizelimit = ~0UL;
+	bmpbgp->startup_delay_ms = 0;
 	bmp_mirrorq_init(&bmpbgp->mirrorq);
 	bmp_bgph_add(&bmp_bgph, bmpbgp);
 
@@ -1876,10 +2461,12 @@ static struct bmp_targets *bmp_targets_get(struct bgp *bgp, const char *name)
 	bt->bgp = bgp;
 	bt->bmpbgp = bmp_bgp_get(bgp);
 	bmp_session_init(&bt->sessions);
-	bmp_qhash_init(&bt->updhash);
-	bmp_qlist_init(&bt->updlist);
-	bmp_qhash_init(&bt->locupdhash);
-	bmp_qlist_init(&bt->locupdlist);
+	bmp_qhash_init(&bt->mon_in_updhash);
+	bmp_qlist_init(&bt->mon_in_updlist);
+	bmp_qhash_init(&bt->mon_loc_updhash);
+	bmp_qlist_init(&bt->mon_loc_updlist);
+	bmp_qhash_init(&bt->mon_out_updhash);
+	bmp_qlist_init(&bt->mon_out_updlist);
 	bmp_actives_init(&bt->actives);
 	bmp_listeners_init(&bt->listeners);
 
@@ -1908,10 +2495,12 @@ static void bmp_targets_put(struct bmp_targets *bt)
 
 	bmp_listeners_fini(&bt->listeners);
 	bmp_actives_fini(&bt->actives);
-	bmp_qhash_fini(&bt->updhash);
-	bmp_qlist_fini(&bt->updlist);
-	bmp_qhash_fini(&bt->locupdhash);
-	bmp_qlist_fini(&bt->locupdlist);
+	bmp_qhash_fini(&bt->mon_in_updhash);
+	bmp_qlist_fini(&bt->mon_in_updlist);
+	bmp_qhash_fini(&bt->mon_loc_updhash);
+	bmp_qlist_fini(&bt->mon_loc_updlist);
+	bmp_qhash_fini(&bt->mon_out_updhash);
+	bmp_qlist_fini(&bt->mon_out_updlist);
 
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl_name);
 	XFREE(MTYPE_BMP_ACLNAME, bt->acl6_name);
@@ -2455,17 +3044,57 @@ DEFPY(bmp_stats_cfg,
 	return CMD_SUCCESS;
 }
 
-#define BMP_POLICY_IS_LOCRIB(str) ((str)[0] == 'l') /* __l__oc-rib */
-#define BMP_POLICY_IS_PRE(str) ((str)[1] == 'r')    /* p__r__e-policy */
+/* __l__oc-rib */
+#define BMP_POLICY_IS_LOCRIB(rib) ((rib)[0] == 'l')
+/* rib-__i__n   p__r__e-policy */
+#define BMP_POLICY_IS_IN_PRE(rib, policy) ((rib)[4] == 'i' \
+					   && (policy) \
+					   && (policy)[1] == 'r')                             \
+ /* rib-__i__n   p__o__st-policy */
+#define BMP_POLICY_IS_IN_POST(rib, policy) ((rib)[4] == 'i' \
+					   && (policy) \
+					   && (policy)[1] == 'o')                              \
+ /* rib-__o__ut   p__r__e-policy */
+#define BMP_POLICY_IS_OUT_PRE(rib, policy) ((rib)[4] == 'o' \
+					   && (policy) \
+					   && (policy)[1] == 'r')                              \
+ /* rib-__o__ut   p__o__st-policy */
+#define BMP_POLICY_IS_OUT_POST(rib, policy) ((rib)[4] == 'o' \
+					   && (policy) \
+					   && (policy)[1] == 'o')
+
+
+DEFPY(bmp_show_locked_cfg, bmp_show_locked_cmd, "bmp locked",
+      BMP_STR "show cmd to debug locked bpi still in hash table\n")
+{
+	struct bmp_bpi_lock *lbpi;
+	frr_each (bmp_lbpi, &bmp_lbpi, lbpi) {
+		if (!lbpi) {
+			zlog_info("no bucket");
+			continue;
+		}
+		if (!lbpi->locked) {
+			zlog_info("empty bucket");
+			continue;
+		}
+		zlog_info("bucket: contains %pRN", lbpi->locked->net);
+		vty_out(vty, "bucket: contains %pRN", lbpi->locked->net);
+	}
+
+	return CMD_SUCCESS;
+}
 
 DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
-      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <pre-policy|post-policy|loc-rib>$policy",
+      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <rib-in|loc-rib|rib-out>$rib [pre-policy|post-policy]$policy",
       NO_STR BMP_STR
       "Send BMP route monitoring messages\n" BGP_AF_STR BGP_AF_STR BGP_AF_STR
-	      BGP_AF_STR BGP_AF_STR BGP_AF_STR BGP_AF_STR
-      "Send state before policy and filter processing\n"
-      "Send state with policy and filters applied\n"
-      "Send state after decision process is applied\n")
+	      BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR
+		      BGP_AF_MODIFIER_STR
+      "Monitor BGP Adj-RIB-In\n"
+      "Monitor BGP Local-RIB\n"
+      "Monitor BGP Adj-RIB-Out\n"
+      "Send state of Adj-RIB-In/out before in/outbound policy is applied\n"
+      "Send state of Adj-RIB-In/out after in/outbound policy is applied\n")
 {
 	int index = 0;
 	uint8_t flag, prev;
@@ -2478,18 +3107,26 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 	argv_find_and_parse_afi(argv, argc, &index, &afi);
 	argv_find_and_parse_safi(argv, argc, &index, &safi);
 
-	if (BMP_POLICY_IS_LOCRIB(policy))
+	if (BMP_POLICY_IS_LOCRIB(rib)) {
 		flag = BMP_MON_LOC_RIB;
-	else if (BMP_POLICY_IS_PRE(policy))
-		flag = BMP_MON_PREPOLICY;
-	else
-		flag = BMP_MON_POSTPOLICY;
+	} else if (BMP_POLICY_IS_IN_PRE(rib, policy)) {
+		flag = BMP_MON_IN_PREPOLICY;
+	} else if (BMP_POLICY_IS_IN_POST(rib, policy)) {
+		flag = BMP_MON_IN_POSTPOLICY;
+	} else if (BMP_POLICY_IS_OUT_PRE(rib, policy)) {
+		flag = BMP_MON_OUT_PREPOLICY;
+	} else if (BMP_POLICY_IS_OUT_POST(rib, policy)) {
+		flag = BMP_MON_OUT_POSTPOLICY;
+	} else {
+		vty_out(vty, "%% Target RIB doesn't exist\n");
+		return CMD_WARNING;
+	}
 
 	prev = bt->afimon[afi][safi];
 	if (no)
-		bt->afimon[afi][safi] &= ~flag;
+		UNSET_FLAG(bt->afimon[afi][safi], flag);
 	else
-		bt->afimon[afi][safi] |= flag;
+		SET_FLAG(bt->afimon[afi][safi], flag);
 
 	if (prev == bt->afimon[afi][safi])
 		return CMD_SUCCESS;
@@ -2506,6 +3143,8 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 		}
 
 		bmp->afistate[afi][safi] = BMP_AFI_NEEDSYNC;
+
+		pullwr_bump(bmp->pullwr);
 	}
 
 	return CMD_SUCCESS;
@@ -2573,6 +3212,26 @@ DEFPY(no_bmp_mirror_limit_cfg,
 	return CMD_SUCCESS;
 }
 
+DEFPY(bmp_startup_delay_cfg, bmp_startup_delay_cmd,
+      "[no] bmp startup-delay [(0-4294967294)]$startup_delay",
+      NO_STR BMP_STR
+      "Configure delay before BMP starts sending monitoring and mirroring messages\n"
+      "Time in milliseconds\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	struct bmp_bgp *bmpbgp;
+
+	if (!no && startup_delay == 0) {
+		vty_out(vty, "Missing startup delay parameter\n");
+		return CMD_ERR_INCOMPLETE;
+	}
+
+	bmpbgp = bmp_bgp_get(bgp);
+	bmpbgp->startup_delay_ms = !no ? startup_delay : 0;
+
+	return CMD_SUCCESS;
+}
+
 
 DEFPY(show_bmp,
       show_bmp_cmd,
@@ -2589,6 +3248,7 @@ DEFPY(show_bmp,
 	char uptime[BGP_UPTIME_LEN];
 	char *out;
 
+	vty_out(vty, "BMP Module started at %pTVM\n\n", &bmp_startup_time);
 	frr_each(bmp_bgph, &bmp_bgph, bmpbgp) {
 		vty_out(vty, "BMP state for BGP %s:\n\n",
 				bmpbgp->bgp->name_pretty);
@@ -2601,6 +3261,12 @@ DEFPY(show_bmp,
 			vty_out(vty, "                  %9zu bytes buffer size limit\n",
 					bmpbgp->mirror_qsizelimit);
 		vty_out(vty, "\n");
+
+		vty_out(vty, "  Startup delay : %s",
+			bmpbgp->startup_delay_ms == 0 ? "Immediate\n\n" : "");
+		if (bmpbgp->startup_delay_ms != 0)
+			vty_out(vty, "%" PRIu32 "ms\n\n",
+				bmpbgp->startup_delay_ms);
 
 		frr_each(bmp_targets, &bmpbgp->targets, bt) {
 			vty_out(vty, "  Targets \"%s\":\n", bt->name);
@@ -2617,25 +3283,36 @@ DEFPY(show_bmp,
 				if (!afimon_flag)
 					continue;
 
-				const char *pre_str =
+				const char *in_pre_str =
 					CHECK_FLAG(afimon_flag,
-						   BMP_MON_PREPOLICY)
-						? "pre-policy "
+						   BMP_MON_IN_PREPOLICY)
+						? "rib-in pre-policy "
 						: "";
-				const char *post_str =
+				const char *in_post_str =
 					CHECK_FLAG(afimon_flag,
-						   BMP_MON_POSTPOLICY)
-						? "post-policy "
+						   BMP_MON_IN_POSTPOLICY)
+						? "rib-in post-policy "
 						: "";
 				const char *locrib_str =
 					CHECK_FLAG(afimon_flag, BMP_MON_LOC_RIB)
-						? "loc-rib"
+						? "loc-rib "
+						: "";
+				const char *out_pre_str =
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_PREPOLICY)
+						? "rib-out pre-policy "
+						: "";
+				const char *out_post_str =
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_POSTPOLICY)
+						? "rib-out post-policy "
 						: "";
 
 				vty_out(vty,
-					"    Route Monitoring %s %s %s%s%s\n",
-					afi2str(afi), safi2str(safi), pre_str,
-					post_str, locrib_str);
+					"    Route Monitoring %s %s %s%s%s%s%s\n",
+					afi2str(afi), safi2str(safi),
+					in_pre_str, in_post_str, locrib_str,
+					out_pre_str, out_post_str);
 			}
 
 			vty_out(vty, "    Listeners:\n");
@@ -2693,7 +3370,9 @@ DEFPY(show_bmp,
 			vty_out(vty, "\n    %zu connected clients:\n",
 					bmp_session_count(&bt->sessions));
 			tt = ttable_new(&ttable_styles[TTSTYLE_BLANK]);
-			ttable_add_row(tt, "remote|uptime|MonSent|MirrSent|MirrLost|ByteSent|ByteQ|ByteQKernel");
+			ttable_add_row(
+				tt,
+				"remote|uptime|state|MonSent|MirrSent|MirrLost|ByteSent|ByteQ|ByteQKernel");
 			ttable_rowseps(tt, 0, BOTTOM, true, '-');
 
 			frr_each (bmp_session, &bt->sessions, bmp) {
@@ -2705,12 +3384,12 @@ DEFPY(show_bmp,
 				peer_uptime(bmp->t_up.tv_sec, uptime,
 					    sizeof(uptime), false, NULL);
 
-				ttable_add_row(tt, "%s|%s|%Lu|%Lu|%Lu|%Lu|%zu|%zu",
-					       bmp->remote, uptime,
-					       bmp->cnt_update,
-					       bmp->cnt_mirror,
-					       bmp->cnt_mirror_overruns,
-					       total, q, kq);
+				ttable_add_row(
+					tt, "%s|%s|%s|%Lu|%Lu|%Lu|%Lu|%zu|%zu",
+					bmp->remote, uptime,
+					bmp_state_str(bmp->state),
+					bmp->cnt_update, bmp->cnt_mirror,
+					bmp->cnt_mirror_overruns, total, q, kq);
 			}
 			out = ttable_dump(tt, "\n");
 			vty_out(vty, "%s", out);
@@ -2739,6 +3418,10 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 		vty_out(vty, " !\n bmp mirror buffer-limit %zu\n",
 			bmpbgp->mirror_qsizelimit);
 
+	if (bmpbgp->startup_delay_ms != 0)
+		vty_out(vty, " !\n bmp startup-delay %" PRIu32 "\n",
+			bmpbgp->startup_delay_ms);
+
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
 		vty_out(vty, " !\n bmp targets %s\n", bt->name);
 
@@ -2756,17 +3439,28 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 
 		FOREACH_AFI_SAFI (afi, safi) {
 			if (CHECK_FLAG(bt->afimon[afi][safi],
-				       BMP_MON_PREPOLICY))
-				vty_out(vty, "  bmp monitor %s %s pre-policy\n",
+				       BMP_MON_IN_PREPOLICY))
+				vty_out(vty,
+					"  bmp monitor %s %s rib-in pre-policy\n",
 					afi2str_lower(afi), safi2str(safi));
 			if (CHECK_FLAG(bt->afimon[afi][safi],
-				       BMP_MON_POSTPOLICY))
+				       BMP_MON_IN_POSTPOLICY))
 				vty_out(vty,
-					"  bmp monitor %s %s post-policy\n",
+					"  bmp monitor %s %s rib-in post-policy\n",
 					afi2str_lower(afi), safi2str(safi));
 			if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB))
 				vty_out(vty, "  bmp monitor %s %s loc-rib\n",
-					afi2str(afi), safi2str(safi));
+					afi2str_lower(afi), safi2str(safi));
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_PREPOLICY))
+				vty_out(vty,
+					"  bmp monitor %s %s rib-out pre-policy\n",
+					afi2str_lower(afi), safi2str(safi));
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_POSTPOLICY))
+				vty_out(vty,
+					"  bmp monitor %s %s rib-out post-policy\n",
+					afi2str_lower(afi), safi2str(safi));
 		}
 		frr_each (bmp_listeners, &bt->listeners, bl)
 			vty_out(vty, " \n  bmp listener %pSU port %d\n",
@@ -2804,17 +3498,26 @@ static int bgp_bmp_init(struct event_loop *tm)
 	install_element(BMP_NODE, &bmp_acl_cmd);
 	install_element(BMP_NODE, &bmp_stats_cmd);
 	install_element(BMP_NODE, &bmp_monitor_cmd);
+	install_element(BMP_NODE, &bmp_show_locked_cmd);
 	install_element(BMP_NODE, &bmp_mirror_cmd);
 
 	install_element(BGP_NODE, &bmp_mirror_limit_cmd);
 	install_element(BGP_NODE, &no_bmp_mirror_limit_cmd);
+	install_element(BGP_NODE, &bmp_startup_delay_cmd);
 
 	install_element(VIEW_NODE, &show_bmp_cmd);
 
 	resolver_init(tm);
+
+	monotime(&bmp_startup_time);
+
 	return 0;
 }
 
+/* this function is triggered when a route is updated is the BGP RIB
+ * it puts a bmp_queue_entry in the loc-rib queue which will trigger a bmp
+ * monitoring message for loc-rib based on config
+ */
 static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			    struct bgp_dest *bn,
 			    struct bgp_path_info *old_route,
@@ -2837,6 +3540,15 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
+	/* lock the bpi in case of withdraw for rib-out pre-policy
+	 * do this unconditionally because adj_out_changed hook will always be
+	 * called whether rib-out mon is configured or not and this avoids
+	 * problems in case of configuration changes between lock and unlock
+	 * calls
+	 */
+	if (is_withdraw)
+		bmp_mainlock_bpi(updated_route);
+
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
 		if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB)) {
 			is_locribmon_enabled = true;
@@ -2844,15 +3556,18 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 		}
 	}
 
+	/* dont waste time recording the loc-rib install time if not configured
+	 */
 	if (!is_locribmon_enabled)
 		return 0;
 
-	/* route is not installed in locrib anymore and rib uptime was saved */
+	/* route is not installed in loc-rib anymore and rib uptime was
+	 * saved */
 	if (old_route && old_route->extra)
 		bgp_path_info_extra_get(old_route)->bgp_rib_uptime =
 			(time_t)(-1L);
 
-	/* route is installed in locrib from now on so
+	/* route is installed in loc-rib from now on so
 	 * save rib uptime in bgp_path_info_extra
 	 */
 	if (new_route)
@@ -2860,11 +3575,85 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			monotime(NULL);
 
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
-		if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB)) {
+		if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB))
+			continue;
+
+		struct bmp_queue_entry *last_item = bmp_process_one(
+			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
+			afi, safi, bn, peer, BMP_QUEUE_FLAGS_NONE, NULL);
+
+		/* if bmp_process_one returns NULL
+		 * we don't have anything to do next
+		 */
+		if (!last_item)
+			continue;
+
+		frr_each (bmp_session, &bt->sessions, bmp) {
+			if (!bmp->mon_loc_queuepos)
+				bmp->mon_loc_queuepos = last_item;
+
+			pullwr_bump(bmp->pullwr);
+		};
+	};
+
+	return 0;
+}
+
+/* this function is triggered when a change has been registered in the
+ * adj-rib-out. it puts a bmp_queue_entry in the rib-out queue
+ * and which will trigger a bmp monitoring message for rib-out pre/post-policy
+ * if either is configured.
+ */
+static int bmp_adj_out_changed(struct bgp_dest *dest,
+			       struct update_subgroup *subgrp,
+			       struct attr *attr,
+			       struct bgp_path_info *locked_path,
+			       bool post_policy, bool withdraw)
+{
+
+	if (!subgrp) {
+		zlog_debug("%s: no subgrp, bmp rib-out post will not proceed",
+			   __func__);
+		goto out;
+	}
+
+	struct bmp_targets *bt;
+	struct bgp *bgp = SUBGRP_INST(subgrp);
+	struct bmp_bgp *bmpbgp = bmp_bgp_get(bgp);
+	afi_t afi = SUBGRP_AFI(subgrp);
+	safi_t safi = SUBGRP_SAFI(subgrp);
+
+	uint8_t mon_flag =
+		post_policy ? BMP_MON_OUT_POSTPOLICY : BMP_MON_OUT_PREPOLICY;
+
+
+	if (post_policy || !withdraw)
+		locked_path = NULL;
+
+	bool is_riboutmon_enabled = false;
+	frr_each (bmp_targets, &bmpbgp->targets, bt) {
+		if ((is_riboutmon_enabled |=
+		     (CHECK_FLAG(bt->afimon[afi][safi], mon_flag))))
+			break;
+	}
+
+	if (!is_riboutmon_enabled)
+		goto out;
+
+	struct peer_af *paf;
+	struct peer *peer;
+	struct bmp *bmp;
+	frr_each (bmp_targets, &bmpbgp->targets, bt) {
+		if (!CHECK_FLAG(bt->afimon[afi][safi], mon_flag))
+			continue;
+
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			peer = PAF_PEER(paf);
 
 			struct bmp_queue_entry *last_item = bmp_process_one(
-				bt, &bt->locupdhash, &bt->locupdlist, bgp, afi,
-				safi, bn, peer);
+				bt, &bt->mon_out_updhash, &bt->mon_out_updlist,
+				NULL, afi, safi, dest, peer, mon_flag,
+				locked_path);
 
 			/* if bmp_process_one returns NULL
 			 * we don't have anything to do next
@@ -2873,17 +3662,21 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 				continue;
 
 			frr_each (bmp_session, &bt->sessions, bmp) {
-				if (!bmp->locrib_queuepos)
-					bmp->locrib_queuepos = last_item;
+				if (!bmp->mon_out_queuepos)
+					bmp->mon_out_queuepos = last_item;
 
+				// TODO avoid bumping for each update ?
 				pullwr_bump(bmp->pullwr);
 			};
 		}
 	};
 
+out:
+	if (locked_path) // path is not allowed to be NULL for rib-out-pre
+			 // withdraws only
+		bmp_mainunlock_bpi(locked_path);
 	return 0;
 }
-
 
 static int bgp_bmp_module_init(void)
 {
@@ -2891,11 +3684,12 @@ static int bgp_bmp_module_init(void)
 	hook_register(bgp_packet_send, bmp_outgoing_packet);
 	hook_register(peer_status_changed, bmp_peer_status_changed);
 	hook_register(peer_backward_transition, bmp_peer_backward);
-	hook_register(bgp_process, bmp_process);
+	hook_register(bgp_process, bmp_process_ribin);
 	hook_register(bgp_inst_config_write, bmp_config_write);
 	hook_register(bgp_inst_delete, bmp_bgp_del);
 	hook_register(frr_late_init, bgp_bmp_init);
 	hook_register(bgp_route_update, bmp_route_update);
+	hook_register(bgp_adj_out_updated, bmp_adj_out_changed);
 	return 0;
 }
 

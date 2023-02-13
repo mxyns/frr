@@ -12,6 +12,7 @@
 #include "pullwr.h"
 #include "qobj.h"
 #include "resolver.h"
+#include "bgp_updgrp.h"
 
 #define BMP_VERSION_3	3
 
@@ -29,9 +30,11 @@
 #define BMP_READ_BUFSIZ	1024
 
 /* bmp->state */
-#define BMP_None        0
-#define BMP_PeerUp      2
-#define BMP_Run         3
+enum BMP_State {
+	BMP_StartupIdle,
+	BMP_PeerUp,
+	BMP_Run,
+};
 
 /* This one is for BMP Route Monitoring messages, i.e. delivering updates
  * in somewhat processed (as opposed to fully raw, see mirroring below) form.
@@ -60,6 +63,10 @@ struct bmp_queue_entry {
 	struct bmp_qlist_item bli;
 	struct bmp_qhash_item bhi;
 
+	struct bgp_path_info *locked_bpi;
+
+#define BMP_QUEUE_FLAGS_NONE (0 << 0)
+	uint8_t flags;
 	struct prefix p;
 	uint64_t peerid;
 	afi_t afi;
@@ -116,7 +123,7 @@ struct bmp {
 
 	struct pullwr *pullwr;
 
-	int state;
+	enum BMP_State state;
 
 	/* queue positions must remain synced with refcounts in the items.
 	 * Whenever appending a queue item, we need to know the correct number
@@ -124,8 +131,10 @@ struct bmp {
 	 * ahead we need to make sure that refcount is decremented.  Also, on
 	 * disconnects we need to walk the queue and drop our reference.
 	 */
-	struct bmp_queue_entry *locrib_queuepos;
-	struct bmp_queue_entry *queuepos;
+	struct bmp_queue_entry *mon_in_queuepos;
+	struct bmp_queue_entry *mon_loc_queuepos;
+	struct bmp_queue_entry *mon_out_queuepos;
+
 	struct bmp_mirrorq *mirrorpos;
 	bool mirror_lost;
 
@@ -220,9 +229,12 @@ struct bmp_targets {
 	 * - IPv6 / unicast & multicast & VPN
 	 * - L2VPN / EVPN
 	 */
-#define BMP_MON_PREPOLICY	(1 << 0)
-#define BMP_MON_POSTPOLICY	(1 << 1)
+#define BMP_MON_IN_PREPOLICY (1 << 0)
+#define BMP_MON_IN_POSTPOLICY (1 << 1)
 #define BMP_MON_LOC_RIB (1 << 2)
+#define BMP_MON_OUT_PREPOLICY (1 << 3)
+#define BMP_MON_OUT_POSTPOLICY (1 << 4)
+
 
 	uint8_t afimon[AFI_MAX][SAFI_MAX];
 	bool mirror;
@@ -232,11 +244,14 @@ struct bmp_targets {
 	struct event *t_stats;
 	struct bmp_session_head sessions;
 
-	struct bmp_qhash_head updhash;
-	struct bmp_qlist_head updlist;
+	struct bmp_qhash_head mon_in_updhash;
+	struct bmp_qlist_head mon_in_updlist;
 
-	struct bmp_qhash_head locupdhash;
-	struct bmp_qlist_head locupdlist;
+	struct bmp_qhash_head mon_loc_updhash;
+	struct bmp_qlist_head mon_loc_updlist;
+
+	struct bmp_qhash_head mon_out_updhash;
+	struct bmp_qlist_head mon_out_updlist;
 
 	uint64_t cnt_accept, cnt_aclrefused;
 
@@ -261,6 +276,33 @@ struct bmp_bgp_peer {
 	size_t open_tx_len;
 };
 
+/* every bgp_path_info that bmp currently has locked for rib-out-prepolicy
+ * when this is allocated the bgp_path_info is locked using bgp_path_info_lock
+ * when freed unlocked using bpg_path_info_unlock
+ */
+PREDECL_HASH(bmp_lbpi);
+
+struct bmp_bpi_lock {
+	/* hashset field */
+	struct bmp_lbpi_item lbpi;
+
+	/* locked bgp_path_info */
+	struct bgp_path_info *locked;
+
+	/* main lock used to lock between loc-rib trigger (the one who locks)
+	 * and bgp_adj_out_updated (the one who unlocks)
+	 */
+	int main;
+
+	/* secondary lock, one for each bqe in the rib-out queue
+	 * when each bqe is allocated we increment this lock
+	 * when freed we decrement it
+	 * after all bqe are processed, main should be 0 and lock 0 too
+	 * so the bpi can be unlocked (and maybe freed)
+	 */
+	int lock;
+};
+
 /* per struct bgp * data */
 PREDECL_HASH(bmp_bgph);
 
@@ -276,6 +318,8 @@ struct bmp_bgp {
 	size_t mirror_qsize, mirror_qsizemax;
 
 	size_t mirror_qsizelimit;
+
+	uint32_t startup_delay_ms;
 };
 
 enum {
@@ -287,21 +331,25 @@ enum {
 };
 
 enum {
-	BMP_STATS_PFX_REJECTED          = 0,
-	BMP_STATS_PFX_DUP_ADV           = 1,
-	BMP_STATS_PFX_DUP_WITHDRAW      = 2,
-	BMP_STATS_UPD_LOOP_CLUSTER      = 3,
-	BMP_STATS_UPD_LOOP_ASPATH       = 4,
-	BMP_STATS_UPD_LOOP_ORIGINATOR   = 5,
-	BMP_STATS_UPD_LOOP_CONFED       = 6,
-	BMP_STATS_SIZE_ADJ_RIB_IN       = 7,
-	BMP_STATS_SIZE_LOC_RIB          = 8,
-	BMP_STATS_SIZE_ADJ_RIB_IN_SAFI  = 9,
-	BMP_STATS_SIZE_LOC_RIB_IN_SAFI  = 10,
-	BMP_STATS_UPD_7606_WITHDRAW     = 11,
-	BMP_STATS_PFX_7606_WITHDRAW     = 12,
-	BMP_STATS_UPD_DUP               = 13,
-	BMP_STATS_FRR_NH_INVALID        = 65531,
+	BMP_STATS_PFX_REJECTED = 0,
+	BMP_STATS_PFX_DUP_ADV = 1,
+	BMP_STATS_PFX_DUP_WITHDRAW = 2,
+	BMP_STATS_UPD_LOOP_CLUSTER = 3,
+	BMP_STATS_UPD_LOOP_ASPATH = 4,
+	BMP_STATS_UPD_LOOP_ORIGINATOR = 5,
+	BMP_STATS_UPD_LOOP_CONFED = 6,
+	BMP_STATS_SIZE_ADJ_RIB_IN = 7,
+	BMP_STATS_SIZE_LOC_RIB = 8,
+	BMP_STATS_SIZE_ADJ_RIB_IN_SAFI = 9,
+	BMP_STATS_SIZE_LOC_RIB_SAFI = 10,
+	BMP_STATS_UPD_7606_WITHDRAW = 11,
+	BMP_STATS_PFX_7606_WITHDRAW = 12,
+	BMP_STATS_UPD_DUP = 13,
+	BMP_STATS_SIZE_ADJ_RIB_OUT_PRE = 14,
+	BMP_STATS_SIZE_ADJ_RIB_OUT_POST = 15,
+	BMP_STATS_SIZE_ADJ_RIB_OUT_PRE_SAFI = 16,
+	BMP_STATS_SIZE_ADJ_RIB_OUT_POST_SAFI = 17,
+	BMP_STATS_FRR_NH_INVALID = 65531,
 };
 
 DECLARE_MGROUP(BMP);

@@ -2024,7 +2024,7 @@ void subgroup_announce_reset_nhop(uint8_t family, struct attr *attr)
 bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 			     struct update_subgroup *subgrp,
 			     const struct prefix *p, struct attr *attr,
-			     struct attr *post_attr)
+			     struct attr *post_attr, uint8_t special_cond)
 {
 	struct bgp_filter *filter;
 	struct peer *from;
@@ -2057,6 +2057,11 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	bgp = SUBGRP_INST(subgrp);
 	piattr = bgp_path_info_mpath_count(pi) ? bgp_path_info_mpath_attr(pi)
 					       : pi->attr;
+	bool ignore_policy =
+		CHECK_FLAG(special_cond, BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY);
+	bool ignore_path_status =
+		CHECK_FLAG(special_cond, BGP_ANNCHK_SPECIAL_IGNORE_PATH_STATUS);
+
 
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_MAX_PREFIX_OUT) &&
 	    peer->pmax_out[afi][safi] != 0 &&
@@ -2097,21 +2102,22 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 
 	/* With addpath we may be asked to TX all kinds of paths so make sure
 	 * pi is valid */
-	if (!CHECK_FLAG(pi->flags, BGP_PATH_VALID)
-	    || CHECK_FLAG(pi->flags, BGP_PATH_HISTORY)
-	    || CHECK_FLAG(pi->flags, BGP_PATH_REMOVED)) {
+	if (!ignore_path_status && (!CHECK_FLAG(pi->flags, BGP_PATH_VALID) ||
+				    CHECK_FLAG(pi->flags, BGP_PATH_HISTORY) ||
+				    CHECK_FLAG(pi->flags, BGP_PATH_REMOVED))) {
 		return false;
 	}
 
 	/* If this is not the bestpath then check to see if there is an enabled
 	 * addpath
 	 * feature that requires us to advertise it */
-	if (!CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
+	if (!ignore_path_status && !CHECK_FLAG(pi->flags, BGP_PATH_SELECTED))
 		if (!bgp_addpath_capable(pi, peer, afi, safi))
 			return false;
 
 	/* Aggregate-address suppress check. */
-	if (bgp_path_suppressed(pi) && !UNSUPPRESS_MAP_NAME(filter))
+	if (!ignore_policy && bgp_path_suppressed(pi) &&
+	    !UNSUPPRESS_MAP_NAME(filter))
 		return false;
 
 	/*
@@ -2202,7 +2208,8 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	}
 
 	/* ORF prefix-list filter check */
-	if (CHECK_FLAG(peer->af_cap[afi][safi], PEER_CAP_ORF_PREFIX_RM_ADV) &&
+	if (!ignore_policy &&
+	    CHECK_FLAG(peer->af_cap[afi][safi], PEER_CAP_ORF_PREFIX_RM_ADV) &&
 	    CHECK_FLAG(peer->af_cap[afi][safi], PEER_CAP_ORF_PREFIX_SM_RCV))
 		if (peer->orf_plist[afi][safi]) {
 			if (prefix_list_apply(peer->orf_plist[afi][safi], p)
@@ -2217,7 +2224,8 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 		}
 
 	/* Output filter check. */
-	if (bgp_output_filter(peer, p, piattr, afi, safi) == FILTER_DENY) {
+	if (!ignore_policy &&
+	    bgp_output_filter(peer, p, piattr, afi, safi) == FILTER_DENY) {
 		if (bgp_debug_update(NULL, p, subgrp->update_group, 0))
 			zlog_debug("%pBP [Update:SEND] %pFX is filtered", peer,
 				   p);
@@ -2385,7 +2393,11 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	    bgp_otc_egress(peer, attr))
 		return false;
 
-	if (filter->advmap.update_type == UPDATE_TYPE_WITHDRAW &&
+	bgp_peer_remove_private_as(bgp, afi, safi, peer, attr);
+	bgp_peer_as_override(bgp, afi, safi, peer, attr);
+
+	if (!ignore_policy &&
+	    filter->advmap.update_type == UPDATE_TYPE_WITHDRAW &&
 	    filter->advmap.aname &&
 	    route_map_lookup_by_name(filter->advmap.aname)) {
 		struct bgp_path_info rmap_path = {0};
@@ -2412,7 +2424,7 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	}
 
 	/* Route map & unsuppress-map apply. */
-	if (!post_attr &&
+	if (!ignore_policy && !post_attr &&
 	    (ROUTE_MAP_OUT_NAME(filter) || bgp_path_suppressed(pi))) {
 		struct bgp_path_info rmap_path = {0};
 		struct bgp_path_info_extra dummy_rmap_path_extra = {0};
@@ -2993,9 +3005,12 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	 */
 	advertise = bgp_check_advertise(bgp, dest, safi);
 
+	bgp_adj_out_updated(dest, subgrp, &attr, selected, false,
+			    selected && advertise ? false : true, __func__);
+
 	if (selected) {
 		if (subgroup_announce_check(dest, selected, subgrp, p, &attr,
-					    NULL)) {
+					    NULL, 0)) {
 			/* Route is selected, if the route is already installed
 			 * in FIB, then it is advertised
 			 */
@@ -3443,11 +3458,18 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	}
 
 	/* TODO BMP insert rib update hook */
-	if (old_select)
+	if (old_select) {
+		if (old_select->peer)
+			old_select->peer->stat_loc_rib_count[afi][safi]--;
 		bgp_path_info_unset_flag(dest, old_select, BGP_PATH_SELECTED);
+	}
 	if (new_select) {
 		if (debug)
 			zlog_debug("%s: setting SELECTED flag", __func__);
+
+		if (new_select->peer)
+			new_select->peer->stat_loc_rib_count[afi][safi]++;
+
 		bgp_path_info_set_flag(dest, new_select, BGP_PATH_SELECTED);
 		bgp_path_info_unset_flag(dest, new_select,
 					 BGP_PATH_ATTR_CHANGED);
@@ -4233,7 +4255,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			memcpy(&attr->evpn_overlay, evpn,
 			       sizeof(struct bgp_route_evpn));
 		}
-		bgp_adj_in_set(dest, peer, attr, addpath_id);
+		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id);
 	}
 
 	/* Update permitted loop count */
@@ -5103,7 +5125,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	 */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
 	    && peer != bgp->peer_self)
-		if (!bgp_adj_in_unset(&dest, peer, addpath_id)) {
+		if (!bgp_adj_in_unset(&dest, afi, safi, peer, addpath_id)) {
 			assert(dest);
 			peer->stat_pfx_dup_withdraw++;
 
@@ -5695,7 +5717,7 @@ static void bgp_clear_route_table(struct peer *peer, afi_t afi, safi_t safi,
 			ain_next = ain->next;
 
 			if (ain->peer == peer)
-				bgp_adj_in_remove(&dest, ain);
+				bgp_adj_in_remove(&dest, afi, safi, ain);
 
 			ain = ain_next;
 
@@ -5805,7 +5827,7 @@ void bgp_clear_adj_in(struct peer *peer, afi_t afi, safi_t safi)
 			ain_next = ain->next;
 
 			if (ain->peer == peer)
-				bgp_adj_in_remove(&dest, ain);
+				bgp_adj_in_remove(&dest, afi, safi, ain);
 
 			ain = ain_next;
 
