@@ -1153,7 +1153,7 @@ afibreak:
 			prefix_copy(&bmp->syncpos, bgp_dest_get_prefix(bn));
 		}
 
-		if (bmp->targets->afimon[afi][safi] & BMP_MON_POSTPOLICY ||
+		if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY ||
 		    bmp->targets->afimon[afi][safi] & BMP_MON_LOC_RIB) {
 			for (bpiter = bgp_dest_get_bgp_path_info(bn); bpiter;
 			     bpiter = bpiter->next) {
@@ -1171,7 +1171,7 @@ afibreak:
 				bpi = bpiter;
 			}
 		}
-		if (bmp->targets->afimon[afi][safi] & BMP_MON_PREPOLICY) {
+		if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
 			for (adjiter = bn->adj_in; adjiter;
 			     adjiter = adjiter->next) {
 				if (adjiter->peer->qobj_node.nid
@@ -1218,7 +1218,7 @@ afibreak:
 	}
 
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
-	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_POSTPOLICY))
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_POSTPOLICY))
 		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
 			    afi, safi, bpi->uptime);
@@ -1400,7 +1400,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
 				  &bqe->p, prd);
 
-	if (bmp->targets->afimon[afi][safi] & BMP_MON_POSTPOLICY) {
+	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY) {
 		struct bgp_path_info *bpi;
 
 		for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
@@ -1418,7 +1418,7 @@ static bool bmp_wrqueue(struct bmp *bmp, struct pullwr *pullwr)
 		written = true;
 	}
 
-	if (bmp->targets->afimon[afi][safi] & BMP_MON_PREPOLICY) {
+	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
 		struct bgp_adj_in *adjin;
 
 		for (adjin = bn ? bn->adj_in : NULL; adjin;
@@ -2454,13 +2454,16 @@ DEFPY(bmp_stats_cfg,
 }
 
 DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
-      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <pre-policy|post-policy|loc-rib>$policy",
+      "[no] bmp monitor <ipv4|ipv6|l2vpn> <unicast|multicast|evpn|vpn> <rib-in|loc-rib|rib-out>$rib [pre-policy|post-policy]$policy",
       NO_STR BMP_STR
       "Send BMP route monitoring messages\n" BGP_AF_STR BGP_AF_STR BGP_AF_STR
-	      BGP_AF_STR BGP_AF_STR BGP_AF_STR BGP_AF_STR
-      "Send state before policy and filter processing\n"
-      "Send state with policy and filters applied\n"
-      "Send state after decision process is applied\n")
+	      BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR BGP_AF_MODIFIER_STR
+		      BGP_AF_MODIFIER_STR
+      "Monitor BGP Adj-RIB-In\n"
+      "Monitor BGP Local-RIB\n"
+      "Monitor BGP Adj-RIB-Out\n"
+      "Send state of Adj-RIB-In/out before in/outbound policy is applied\n"
+      "Send state of Adj-RIB-In/out after in/outbound policy is applied\n")
 {
 	int index = 0;
 	uint8_t flag, prev;
@@ -2473,18 +2476,24 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 	argv_find_and_parse_afi(argv, argc, &index, &afi);
 	argv_find_and_parse_safi(argv, argc, &index, &safi);
 
-	if (policy[0] == 'l')
+	if (rib[0] == 'l') {
 		flag = BMP_MON_LOC_RIB;
-	else if (policy[1] == 'r')
-		flag = BMP_MON_PREPOLICY;
-	else
-		flag = BMP_MON_POSTPOLICY;
+	} else if (rib[4] == 'i') {
+		flag = policy && policy[1] == 'r' ? BMP_MON_IN_PREPOLICY
+						  : BMP_MON_IN_POSTPOLICY;
+	} else if (rib[4] == 'o') {
+		flag = policy && policy[1] == 'r' ? BMP_MON_OUT_PREPOLICY
+						  : BMP_MON_OUT_POSTPOLICY;
+	} else {
+		vty_out(vty, "%% Target RIB doesn't exist\n");
+		return CMD_WARNING;
+	}
 
 	prev = bt->afimon[afi][safi];
 	if (no)
-		bt->afimon[afi][safi] &= ~flag;
+		UNSET_FLAG(bt->afimon[afi][safi], flag);
 	else
-		bt->afimon[afi][safi] |= flag;
+		SET_FLAG(bt->afimon[afi][safi], flag);
 
 	if (prev == bt->afimon[afi][safi])
 		return CMD_SUCCESS;
@@ -2612,23 +2621,32 @@ DEFPY(show_bmp,
 				if (!afimon_flag)
 					continue;
 
-				const char *pre_str =
-					afimon_flag & BMP_MON_PREPOLICY
-						? "pre-policy "
+				const char *in_pre_str =
+					afimon_flag & BMP_MON_IN_PREPOLICY
+						? "rib-in pre-policy "
 						: "";
-				const char *post_str =
-					afimon_flag & BMP_MON_POSTPOLICY
-						? "post-policy "
+				const char *in_post_str =
+					afimon_flag & BMP_MON_IN_POSTPOLICY
+						? "rib-in post-policy "
 						: "";
 				const char *locrib_str =
 					afimon_flag & BMP_MON_LOC_RIB
-						? "loc-rib"
+						? "loc-rib "
+						: "";
+				const char *out_pre_str =
+					afimon_flag & BMP_MON_IN_PREPOLICY
+						? "rib-out pre-policy "
+						: "";
+				const char *out_post_str =
+					afimon_flag & BMP_MON_IN_POSTPOLICY
+						? "rib-out post-policy"
 						: "";
 
 				vty_out(vty,
-					"    Route Monitoring %s %s %s%s%s\n",
-					afi2str(afi), safi2str(safi), pre_str,
-					post_str, locrib_str);
+					"    Route Monitoring %s %s %s%s%s%s%s\n",
+					afi2str(afi), safi2str(safi),
+					in_pre_str, in_post_str, locrib_str,
+					out_pre_str, out_post_str);
 			}
 
 			vty_out(vty, "    Listeners:\n");
@@ -2748,16 +2766,25 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 			vty_out(vty, "  bmp mirror\n");
 
 		FOREACH_AFI_SAFI (afi, safi) {
-			if (bt->afimon[afi][safi] & BMP_MON_PREPOLICY)
-				vty_out(vty, "  bmp monitor %s %s pre-policy\n",
-					afi2str_lower(afi), safi2str(safi));
-			if (bt->afimon[afi][safi] & BMP_MON_POSTPOLICY)
+			if (bt->afimon[afi][safi] & BMP_MON_IN_PREPOLICY)
 				vty_out(vty,
-					"  bmp monitor %s %s post-policy\n",
+					"  bmp monitor %s %s rib-in pre-policy\n",
+					afi2str_lower(afi), safi2str(safi));
+			if (bt->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY)
+				vty_out(vty,
+					"  bmp monitor %s %s rib-in post-policy\n",
 					afi2str_lower(afi), safi2str(safi));
 			if (bt->afimon[afi][safi] & BMP_MON_LOC_RIB)
 				vty_out(vty, "  bmp monitor %s %s loc-rib\n",
-					afi2str(afi), safi2str(safi));
+					afi2str_lower(afi), safi2str(safi));
+			if (bt->afimon[afi][safi] & BMP_MON_OUT_PREPOLICY)
+				vty_out(vty,
+					"  bmp monitor %s %s rib-out pre-policy\n",
+					afi2str_lower(afi), safi2str(safi));
+			if (bt->afimon[afi][safi] & BMP_MON_OUT_POSTPOLICY)
+				vty_out(vty,
+					"  bmp monitor %s %s rib-out post-policy\n",
+					afi2str_lower(afi), safi2str(safi));
 		}
 		frr_each (bmp_listeners, &bt->listeners, bl)
 			vty_out(vty, " \n  bmp listener %pSU port %d\n",
