@@ -550,6 +550,7 @@ void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 
 	subgrp->version = MAX(subgrp->version, dest->version);
 
+	zlog_info("%s: hook call", __func__);
 	hook_call(bgp_adj_out_updated, dest, subgrp, attr, path, false);
 }
 
@@ -606,11 +607,14 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 		}
 		if (!CHECK_FLAG(subgrp->sflags, SUBGRP_STATUS_TABLE_REPARSING))
 			subgrp->pscount--;
+
+
+		zlog_info("%s: hook call", __func__);
+		hook_call(bgp_adj_out_updated, dest, subgrp, NULL, NULL, withdraw);
 	}
 
 	subgrp->version = MAX(subgrp->version, dest->version);
 
-	hook_call(bgp_adj_out_updated, dest, subgrp, NULL, NULL, withdraw);
 }
 
 void bgp_adj_out_remove_subgroup(struct bgp_dest *dest, struct bgp_adj_out *adj,

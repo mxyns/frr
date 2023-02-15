@@ -852,6 +852,7 @@ static int bmp_peer_backward(struct peer *peer)
 
 
 /* sends a bmp end-of-rib on the bmp session for the given afi/safi
+ * for each peer
  */
 static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 		    uint8_t peer_type_flag)
@@ -1059,6 +1060,111 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	stream_free(msg);
 }
 
+
+struct rib_out_updgrp_walkctx {
+	struct bmp *bmp;
+	struct bgp_dest *dest;
+	struct prefix_rd *prd;
+	struct attr *attr;
+	bool *written_ref;
+};
+
+static inline bool
+bmp_monitor_rib_out_walk(struct bmp *bmp, afi_t afi, safi_t safi,
+			 struct bgp_dest *dest, struct attr *attr,
+			 struct prefix_rd *prd,
+			 int(*cb)(struct update_group *updgrd, void *ctx)) {
+	bool written = false;
+	struct rib_out_updgrp_walkctx walkctx = {
+		.bmp = bmp,
+		.dest = dest,
+		.attr = attr,
+		.prd = prd,
+		.written_ref = &written
+	};
+
+	update_group_af_walk(bmp->targets->bgp, afi, safi,
+			     cb,
+			     (void *)&walkctx);
+
+	return written;
+}
+
+static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp, void *hidden_ctx) {
+
+
+	struct rib_out_updgrp_walkctx *ctx = (struct rib_out_updgrp_walkctx *)hidden_ctx;
+
+	struct update_subgroup *subgrp;
+	struct peer_af *paf;
+	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
+		// TODO filter out who has this prefix in rib-out pre
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O,
+				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &ctx->dest->p, ctx->prd,
+				    ctx->attr, SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
+				    monotime(NULL));
+
+			*ctx->written_ref = true;
+		}
+	}
+
+	return HASHWALK_CONTINUE;
+};
+
+static inline bool bmp_monitor_rib_out_pre_walk(struct bmp *bmp, afi_t afi,
+						safi_t safi,
+						struct bgp_dest *dest,
+						struct attr *attr,
+						struct prefix_rd *prd) {
+	return bmp_monitor_rib_out_walk(bmp, afi, safi, dest, attr, prd,
+					bmp_monitor_rib_out_pre_updgrp_walkcb);
+}
+
+static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp, void *hidden_ctx) {
+
+
+	struct rib_out_updgrp_walkctx *ctx = (struct rib_out_updgrp_walkctx *)hidden_ctx;
+
+	struct update_subgroup *subgrp;
+	struct peer_af *paf;
+	struct bgp_adj_out *adj;
+	struct attr *advertised_attr;
+
+	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
+
+		adj = adj_lookup(ctx->dest, subgrp, 0);
+
+		if (!adj)
+			continue;
+
+		advertised_attr = adj->adv && adj->adv->baa ?
+							    adj->adv->baa->attr
+							    : adj->attr;
+
+		SUBGRP_FOREACH_PEER (subgrp, paf) {
+			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O | BMP_PEER_FLAG_L,
+				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &ctx->dest->p, ctx->prd,
+				    advertised_attr, SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
+				    monotime(NULL));
+
+			*ctx->written_ref = true;
+		}
+
+
+	}
+
+	return HASHWALK_CONTINUE;
+};
+
+static inline bool bmp_monitor_rib_out_post_walk(struct bmp *bmp, afi_t afi,
+						safi_t safi,
+						struct bgp_dest *dest,
+						struct prefix_rd *prd) {
+	return bmp_monitor_rib_out_walk(bmp, afi, safi, dest, NULL, prd,
+					bmp_monitor_rib_out_post_updgrp_walkcb);
+}
+
 /* does the bmp synchronization
  */
 static bool bmp_wrsync(struct bmp *bmp, struct pullwr *pullwr)
@@ -1161,12 +1267,21 @@ afibreak:
 						bmp->remote, afi2str(afi),
 						safi2str(safi));
 
-				bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_L,
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_PREPOLICY))
+					bmp_eor(bmp, afi, safi, 0,
+						BMP_PEER_TYPE_GLOBAL_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_POSTPOLICY))
+					bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_L,
 					BMP_PEER_TYPE_GLOBAL_INSTANCE);
-				bmp_eor(bmp, afi, safi, 0,
-					BMP_PEER_TYPE_GLOBAL_INSTANCE);
-				bmp_eor(bmp, afi, safi, 0,
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB))
+					bmp_eor(bmp, afi, safi, 0,
 					BMP_PEER_TYPE_LOC_RIB_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_PREPOLICY))
+					bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_O,
+					BMP_PEER_TYPE_GLOBAL_INSTANCE);
+				if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_POSTPOLICY))
+					bmp_eor(bmp, afi, safi, BMP_PEER_FLAG_O | BMP_PEER_FLAG_L,
+					BMP_PEER_TYPE_GLOBAL_INSTANCE);
 
 				bmp->afistate[afi][safi] = BMP_AFI_LIVE;
 				bmp->syncafi = AFI_MAX;
@@ -1178,7 +1293,9 @@ afibreak:
 		}
 
 		if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY ||
-		    bmp->targets->afimon[afi][safi] & BMP_MON_LOC_RIB) {
+		    bmp->targets->afimon[afi][safi] & BMP_MON_LOC_RIB ||
+		    bmp->targets->afimon[afi][safi] & BMP_MON_OUT_PREPOLICY ||
+		    bmp->targets->afimon[afi][safi] & BMP_MON_OUT_POSTPOLICY) {
 			for (bpiter = bgp_dest_get_bgp_path_info(bn); bpiter;
 			     bpiter = bpiter->next) {
 				if (!CHECK_FLAG(bpiter->flags,
@@ -1233,28 +1350,54 @@ afibreak:
 	    (safi == SAFI_MPLS_VPN))
 		prd = (struct prefix_rd *)bgp_dest_get_prefix(bmp->syncrdpos);
 
+	bool written = false;
+
+	if (adjin) {
+		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
+			    bn_p, prd, adjin->attr, afi, safi, adjin->uptime);
+		written = true;
+	}
+
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_POSTPOLICY)) {
+		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
+			    afi, safi, bpi->uptime);
+		written = true;
+
+	}
+
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
 	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_LOC_RIB)) {
 		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    bn_p, prd, bpi->attr, afi, safi,
 			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
 					      : (time_t)(-1L));
+		written = true;
 	}
 
-	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
-	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_POSTPOLICY))
-		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
-			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
-			    afi, safi, bpi->uptime);
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_PREPOLICY)) {
+		written |= bmp_monitor_rib_out_pre_walk(bmp, afi, safi, bn, bpi->attr, prd);
+	}
 
-	if (adjin)
-		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    bn_p, prd, adjin->attr, afi, safi, adjin->uptime);
+	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED) &&
+	    CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_POSTPOLICY)) {
+		written |= bmp_monitor_rib_out_post_walk(bmp, afi, safi, bn, prd);
+	}
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
 
-	return true;
+	/* if we got here and nothing is written it means this specific
+	 * destination had no monitoring configured or configured monitoring
+	 * had nothing to send. we need to bump for wrsync to be called for the
+	 * following destinations in the table
+	 */
+	if (!written)
+		pullwr_bump(bmp->pullwr);
+
+	return written;
 }
 
 /* pulls a bqe from a given list
@@ -1337,35 +1480,6 @@ static inline int bmp_prefix_will_sync(struct bmp *bmp, afi_t afi, safi_t safi,
 	return 0;
 }
 
-struct rib_out_pre_updgrp_walkctx {
-	struct bmp *bmp;
-	struct bmp_queue_entry *bqe;
-	struct prefix_rd *prd;
-	struct attr *attr;
-	bool *written_ref;
-};
-static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp, void *hidden_ctx) {
-
-
-	struct rib_out_pre_updgrp_walkctx *ctx = (struct rib_out_pre_updgrp_walkctx *)hidden_ctx;
-
-	struct update_subgroup *subgrp;
-	struct peer_af *paf;
-	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
-		// TODO filter out who has this prefix in rib-out pre
-		SUBGRP_FOREACH_PEER (subgrp, paf) {
-			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O,
-				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &ctx->bqe->p, ctx->prd,
-				    ctx->attr, SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    monotime(NULL));
-
-			*ctx->written_ref = true;
-		}
-	}
-
-	return HASHWALK_CONTINUE;
-};
-
 /* gets a bqe from the loc-rib queue and sends a bmp monitoring message for
  * loc-rib (if configured) and a bmp monitoring message for rib-out pre-policy
  * for each bgp peer.
@@ -1445,17 +1559,8 @@ static bool bmp_wrqueue_locrib_riboutpre(struct bmp *bmp, struct pullwr *pullwr)
 	 */
 	if (ribout_pre_conf
 	    && bmp->targets->bgp->update_groups[afindex(afi, safi)]) {
-		struct rib_out_pre_updgrp_walkctx walkctx = {
-			.bmp = bmp,
-			.bqe = bqe,
-			.attr = bpi ? bpi->attr : NULL,
-			.prd = prd,
-			.written_ref = &written
-		};
-
-		update_group_af_walk(bmp->targets->bgp, afi, safi,
-				bmp_monitor_rib_out_pre_updgrp_walkcb,
-				(struct rib_out_pre_updgrp_walkctx *)&walkctx);
+		written |= bmp_monitor_rib_out_pre_walk(
+			bmp, afi, safi, bn, bpi ? bpi->attr : NULL, prd);
 	}
 
 out:
@@ -1505,6 +1610,20 @@ static bool bmp_wrqueue_in(struct bmp *bmp, struct pullwr *pullwr)
 	bn = bgp_afi_node_lookup(bmp->targets->bgp->rib[afi][safi], afi, safi,
 				 &bqe->p, prd);
 
+	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
+		struct bgp_adj_in *adjin;
+
+		for (adjin = bn ? bn->adj_in : NULL; adjin;
+		     adjin = adjin->next) {
+			if (adjin->peer == peer)
+				break;
+		}
+		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
+			    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
+			    adjin ? adjin->uptime : monotime(NULL));
+		written = true;
+	}
+
 	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY) {
 		struct bgp_path_info *bpi;
 
@@ -1520,20 +1639,6 @@ static bool bmp_wrqueue_in(struct bmp *bmp, struct pullwr *pullwr)
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi, safi,
 			    bpi ? bpi->uptime : monotime(NULL));
-		written = true;
-	}
-
-	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
-		struct bgp_adj_in *adjin;
-
-		for (adjin = bn ? bn->adj_in : NULL; adjin;
-		     adjin = adjin->next) {
-			if (adjin->peer == peer)
-				break;
-		}
-		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
-			    adjin ? adjin->uptime : monotime(NULL));
 		written = true;
 	}
 
@@ -1565,7 +1670,7 @@ static bool bmp_wrqueue_riboutpost(struct bmp *bmp, struct pullwr *pullwr)
 	safi_t safi = bqe->safi;
 
 
-	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_POSTPOLICY)) {
+	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_POSTPOLICY)) {
 		goto out;
 	}
 
@@ -1727,7 +1832,7 @@ static int bmp_process_ribin(struct bgp *bgp, afi_t afi, safi_t safi,
 		return 0;
 
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
-		if (CHECK_FLAG(bt->afimon[afi][safi],
+		if (!CHECK_FLAG(bt->afimon[afi][safi],
 			       BMP_MON_IN_PREPOLICY | BMP_MON_IN_POSTPOLICY))
 			continue;
 
@@ -2668,13 +2773,13 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 	argv_find_and_parse_afi(argv, argc, &index, &afi);
 	argv_find_and_parse_safi(argv, argc, &index, &safi);
 
-	if (rib[0] == 'l') {
+	if (!policy && rib[0] == 'l') {
 		flag = BMP_MON_LOC_RIB;
-	} else if (rib[4] == 'i') {
-		flag = policy && policy[1] == 'r' ? BMP_MON_IN_PREPOLICY
+	} else if (policy && rib[4] == 'i') {
+		flag = policy[1] == 'r' ? BMP_MON_IN_PREPOLICY
 						  : BMP_MON_IN_POSTPOLICY;
-	} else if (rib[4] == 'o') {
-		flag = policy && policy[1] == 'r' ? BMP_MON_OUT_PREPOLICY
+	} else if (policy && rib[4] == 'o') {
+		flag = policy[1] == 'r' ? BMP_MON_OUT_PREPOLICY
 						  : BMP_MON_OUT_POSTPOLICY;
 	} else {
 		vty_out(vty, "%% Target RIB doesn't exist\n");
@@ -2826,11 +2931,11 @@ DEFPY(show_bmp,
 						? "loc-rib "
 						: "";
 				const char *out_pre_str =
-					afimon_flag & BMP_MON_IN_PREPOLICY
+					afimon_flag & BMP_MON_OUT_PREPOLICY
 						? "rib-out pre-policy "
 						: "";
 				const char *out_post_str =
-					afimon_flag & BMP_MON_IN_POSTPOLICY
+					afimon_flag & BMP_MON_OUT_POSTPOLICY
 						? "rib-out post-policy"
 						: "";
 
@@ -3049,7 +3154,6 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	/* dont waste time recording the loc-rib install time if not configured
 	 */
 	if (is_locribmon_enabled) {
-		return 0;
 
 		/* route is not installed in loc-rib anymore and rib uptime was saved */
 		if (old_route && old_route->extra)
@@ -3065,8 +3169,9 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	}
 
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
-		if (CHECK_FLAG(bt->afimon[afi][safi],
-			       BMP_MON_LOC_RIB | BMP_MON_OUT_PREPOLICY)) {
+		if (!CHECK_FLAG(bt->afimon[afi][safi],
+			       BMP_MON_LOC_RIB | BMP_MON_OUT_PREPOLICY))
+			continue;
 
 			struct bmp_queue_entry *last_item = bmp_process_one(
 				bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist,
@@ -3083,7 +3188,6 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 
 				pullwr_bump(bmp->pullwr);
 			};
-		}
 	};
 
 	return 0;
@@ -3099,7 +3203,8 @@ static int bmp_adj_out_changed(struct bgp_dest *dest,
 	   struct bgp_path_info *path, bool withdraw) {
 
 	if (!subgrp) {
-		zlog_debug("%s: no subgrp, bmp rib-out will not proceed");
+		zlog_debug("%s: no subgrp, bmp rib-out post will not proceed");
+		return 0;
 	}
 
 	struct bmp_targets *bt;
@@ -3137,7 +3242,7 @@ static int bmp_adj_out_changed(struct bgp_dest *dest,
 					continue;
 
 				frr_each (bmp_session, &bt->sessions, bmp) {
-					if (!bmp->mon_loc_queuepos)
+					if (!bmp->mon_out_queuepos)
 						bmp->mon_out_queuepos = last_item;
 
 					// TODO avoid bumping for each update ?
