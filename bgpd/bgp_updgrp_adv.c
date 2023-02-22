@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 /**
  * bgp_updgrp_adv.c: BGP update group advertisement and adjacency
  *                   maintenance
@@ -39,8 +38,8 @@
 DEFINE_HOOK(bgp_adj_out_updated,
 	     (struct bgp_dest *dest,
 	      struct update_subgroup *subgrp, struct attr *attr,
-	      struct bgp_path_info *path, bool withdraw),
-	     (dest, subgrp, attr, path, withdraw));
+	      struct bgp_path_info *path, bool post_policy, bool withdraw),
+	     (dest, subgrp, attr, path, post_policy, withdraw));
 
 /********************
  * PRIVATE FUNCTIONS
@@ -444,6 +443,46 @@ bgp_advertise_clean_subgroup(struct update_subgroup *subgrp,
 	return next;
 }
 
+void bgp_adj_out_updated(struct bgp_dest *dest, struct update_subgroup *subgrp,
+			 struct attr *attr, struct bgp_path_info *path,
+			 bool post_policy, bool withdraw, const char *caller)
+{
+
+	if (post_policy) {
+		hook_call(bgp_adj_out_updated, dest, subgrp, attr, NULL,
+			  true, withdraw);
+		return;
+	}
+
+	if (!path && withdraw) {
+		for (path = dest ? bgp_dest_get_bgp_path_info(dest) : NULL; path;
+		     path = path->next) {
+			if (CHECK_FLAG(path->flags, BGP_BMP_HELD))
+				break;
+		}
+
+		if (!path)
+			return;
+	}
+
+	struct attr dummy_attr = {0};
+	/*
+	 * withdraw 	| pre_check	| result
+	 * true		| true		| withdraw
+	 * true		| false		| nothing to do
+	 * false	| true		| update
+	 * false	| false		| nothing to do
+	 */
+	bool pre_check = subgroup_announce_check(dest, path, subgrp, &dest->p, &dummy_attr,
+				NULL, BGP_ANNCHK_SPECIAL_PREPOLICY);
+
+	if (!pre_check)
+		return;
+
+	hook_call(bgp_adj_out_updated, dest, subgrp, attr, path,
+		  false, withdraw);
+}
+
 void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 			      struct update_subgroup *subgrp, struct attr *attr,
 			      struct bgp_path_info *path)
@@ -550,8 +589,7 @@ void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 
 	subgrp->version = MAX(subgrp->version, dest->version);
 
-	zlog_info("%s: hook call", __func__);
-	hook_call(bgp_adj_out_updated, dest, subgrp, attr, path, false);
+	bgp_adj_out_updated(dest, subgrp, attr, path, true, false, __func__);
 }
 
 /* The only time 'withdraw' will be false is if we are sending
@@ -601,6 +639,9 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 
 			if (trigger_write)
 				subgroup_trigger_write(subgrp);
+
+			bgp_adj_out_updated(dest, subgrp, NULL, NULL, true,
+					    withdraw, __func__);
 		} else {
 			/* Free allocated information.  */
 			adj_free(adj);
@@ -608,9 +649,6 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 		if (!CHECK_FLAG(subgrp->sflags, SUBGRP_STATUS_TABLE_REPARSING))
 			subgrp->pscount--;
 
-
-		zlog_info("%s: hook call", __func__);
-		hook_call(bgp_adj_out_updated, dest, subgrp, NULL, NULL, withdraw);
 	}
 
 	subgrp->version = MAX(subgrp->version, dest->version);
@@ -692,8 +730,11 @@ void subgroup_announce_table(struct update_subgroup *subgrp,
 						safi_rib))
 				continue;
 
+			bgp_adj_out_updated(dest, subgrp, &attr, ri, false,
+					    advertise ? false : true, __func__);
+
 			if (subgroup_announce_check(dest, ri, subgrp, dest_p,
-						    &attr, NULL)) {
+						    &attr, NULL, 0)) {
 				/* Check if route can be advertised */
 				if (advertise) {
 					if (!bgp_check_withdrawal(bgp, dest))
@@ -914,6 +955,8 @@ void subgroup_default_originate(struct update_subgroup *subgrp, int withdraw)
 	dest = bgp_afi_node_lookup(bgp->rib[afi][safi_rib], afi, safi_rib, &p,
 				   NULL);
 
+	// TODO BMP hook call for pre-policy
+
 	if (withdraw) {
 		/* Withdraw the default route advertised using default
 		 * originate
@@ -932,7 +975,7 @@ void subgroup_default_originate(struct update_subgroup *subgrp, int withdraw)
 					if (subgroup_announce_check(
 						    dest, pi, subgrp,
 						    bgp_dest_get_prefix(dest),
-						    &attr, NULL)) {
+						    &attr, NULL, 0)) {
 						struct attr *default_attr =
 							bgp_attr_intern(&attr);
 

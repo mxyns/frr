@@ -61,6 +61,10 @@ struct bmp_queue_entry {
 	struct bmp_qlist_item bli;
 	struct bmp_qhash_item bhi;
 
+	struct bgp_path_info *locked_bpi;
+
+#define BMP_QUEUE_FLAGS_NONE (0 << 0)
+	uint8_t flags;
 	struct prefix p;
 	uint64_t peerid;
 	afi_t afi;
@@ -269,6 +273,18 @@ struct bmp_bgp_peer {
 
 	uint8_t *open_tx;
 	size_t open_tx_len;
+};
+
+/* per struct peer * data.  Lookup by peer->qobj_node.nid, created on demand,
+ * deleted in peer_backward hook. */
+PREDECL_HASH(bmp_lbpi);
+
+struct bmp_bpi_lock {
+	struct bmp_lbpi_item lbpi;
+
+	struct bgp_path_info *locked;
+	int main;
+	int lock;
 };
 
 /* per struct bgp * data */

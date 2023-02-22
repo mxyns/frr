@@ -301,6 +301,7 @@ struct bgp_path_info {
 #define BGP_PATH_ANNC_NH_SELF (1 << 14)
 #define BGP_PATH_LINK_BW_CHG (1 << 15)
 #define BGP_PATH_ACCEPT_OWN (1 << 16)
+#define BGP_BMP_HELD (1 << 17)
 
 	/* BGP route type.  This can be static, RIP, OSPF, BGP etc.  */
 	uint8_t type;
@@ -818,11 +819,16 @@ extern void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 					       struct bgp_dest *dest,
 					       uint32_t addpath_tx_id);
 
+#define BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY (1 << 0)
+#define BGP_ANNCHK_SPECIAL_IGNORE_PATH_STATUS (1 << 1)
+#define BGP_ANNCHK_SPECIAL_PREPOLICY (BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY \
+				      | BGP_ANNCHK_SPECIAL_IGNORE_PATH_STATUS)
 extern bool subgroup_announce_check(struct bgp_dest *dest,
 				    struct bgp_path_info *pi,
 				    struct update_subgroup *subgrp,
 				    const struct prefix *p, struct attr *attr,
-				    struct attr *post_attr);
+				    struct attr *post_attr,
+				    uint8_t special_cond);
 
 extern void bgp_peer_clear_node_queue_drain_immediate(struct peer *peer);
 extern void bgp_process_queues_drain_immediate(void);

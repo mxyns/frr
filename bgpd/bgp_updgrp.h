@@ -59,14 +59,11 @@
 	 | PEER_CAP_ADDPATH_AF_TX_ADV | PEER_CAP_ADDPATH_AF_RX_RCV             \
 	 | PEER_CAP_ENHE_AF_NEGO)
 
-
-/* called when a route is updated in the adj-out */
 DECLARE_HOOK(bgp_adj_out_updated,
-	     (struct bgp_dest *dest,
-	      struct update_subgroup *subgrp, struct attr *attr,
-	      struct bgp_path_info *path, bool withdraw),
-	     (dest, subgrp, attr, path, withdraw));
-
+	    (struct bgp_dest *dest,
+	     struct update_subgroup *subgrp, struct attr *attr,
+	     struct bgp_path_info *path, bool post_policy, bool withdraw),
+	    (dest, subgrp, attr, path, post_policy, withdraw));
 
 enum bpacket_attr_vec_type { BGP_ATTR_VEC_NH = 0, BGP_ATTR_VEC_MAX };
 
@@ -456,6 +453,11 @@ extern void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 				     struct update_subgroup *subgrp,
 				     struct attr *attr,
 				     struct bgp_path_info *path);
+extern void bgp_adj_out_updated(struct bgp_dest *dest,
+				struct update_subgroup *subgrp,
+				struct attr *attr, struct bgp_path_info *path,
+				bool post_policy, bool withdraw,
+				const char *caller);
 extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       struct update_subgroup *subgrp,
 				       char withdraw, uint32_t addpath_tx_id);

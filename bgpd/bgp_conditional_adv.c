@@ -97,6 +97,19 @@ static void bgp_conditional_adv_routes(struct peer *peer, afi_t afi,
 		for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next) {
 			advmap_attr = *pi->attr;
 
+			bool selected = bgp_check_selected(pi, peer, addpath_capable, afi,
+							   safi);
+
+			if (selected) {
+				bgp_adj_out_updated(
+					dest, subgrp, &attr, pi, false,
+					update_type == UPDATE_TYPE_ADVERTISE
+						? false
+						: true,
+					__func__);
+			}
+
+
 			/* Fill temp path_info */
 			prep_for_rmap_apply(&path, &path_extra, dest, pi,
 					    pi->peer, &advmap_attr);
@@ -105,8 +118,7 @@ static void bgp_conditional_adv_routes(struct peer *peer, afi_t afi,
 
 			ret = route_map_apply(rmap, dest_p, &path);
 			if (ret != RMAP_PERMITMATCH ||
-			    !bgp_check_selected(pi, peer, addpath_capable, afi,
-						safi)) {
+			    !selected) {
 				bgp_attr_flush(&advmap_attr);
 				continue;
 			}
@@ -120,7 +132,7 @@ static void bgp_conditional_adv_routes(struct peer *peer, afi_t afi,
 			 */
 			if (update_type == UPDATE_TYPE_ADVERTISE &&
 			    subgroup_announce_check(dest, pi, subgrp, dest_p,
-						    &attr, &advmap_attr)) {
+						    &attr, &advmap_attr, 0)) {
 				bgp_adj_out_set_subgroup(dest, subgrp, &attr,
 							 pi);
 			} else {
