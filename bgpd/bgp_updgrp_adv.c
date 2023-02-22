@@ -204,6 +204,10 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 								adj->addpath_tx_id);
 						}
 					}
+
+					if (!adj)
+						bgp_adj_out_updated(ctx->dest, subgrp, NULL, NULL, false, true, __func__);
+
 				}
 			}
 		}

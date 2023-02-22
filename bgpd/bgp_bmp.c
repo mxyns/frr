@@ -2956,6 +2956,8 @@ DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
 		}
 
 		bmp->afistate[afi][safi] = BMP_AFI_NEEDSYNC;
+
+		pullwr_bump(bmp->pullwr);
 	}
 
 	return CMD_SUCCESS;
