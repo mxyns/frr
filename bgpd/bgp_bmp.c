@@ -1207,7 +1207,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 	return HASHWALK_CONTINUE;
 };
 
-/* for bmp sync and monitor */
+/* only for bmp sync */
 static inline bool bmp_monitor_rib_out_pre_walk(struct bmp *bmp, afi_t afi,
 						safi_t safi, struct prefix *pfx,
 						struct bgp_dest *dest,
@@ -1216,15 +1216,14 @@ static inline bool bmp_monitor_rib_out_pre_walk(struct bmp *bmp, afi_t afi,
 						struct prefix_rd *prd)
 {
 	bool written = false;
-	struct rib_out_pre_updgrp_walkctx walkctx = {
-		.bmp = bmp,
-		.pfx = pfx,
-		// for withdraws, dest may be null
-		.dest = dest ? dest : bpi->net,
-		.bpi = bpi,
-		.attr = attr,
-		.prd = prd,
-		.written_ref = &written};
+	struct rib_out_pre_updgrp_walkctx walkctx = {.bmp = bmp,
+						     .pfx = pfx,
+						     .dest = dest ? dest
+								  : bpi->net,
+						     .bpi = bpi,
+						     .attr = attr,
+						     .prd = prd,
+						     .written_ref = &written};
 
 	update_group_af_walk(bmp->targets->bgp, afi, safi,
 			     bmp_monitor_rib_out_pre_updgrp_walkcb,
@@ -1302,7 +1301,7 @@ static inline bool bmp_monitor_rib_out_post_walk(struct bmp *bmp, afi_t afi,
 	return written;
 }
 
-/* does the bmp synchronization
+/* does the bmp initial rib synchronization
  */
 static bool bmp_wrsync(struct bmp *bmp, struct pullwr *pullwr)
 {
@@ -1579,7 +1578,7 @@ static inline struct bmp_queue_entry *bmp_pull_ribin(struct bmp *bmp)
 				   &bmp->mon_in_queuepos);
 }
 
-/* shortcut to pull a bqe from the loc-rib / rib-out pre queue
+/* shortcut to pull a bqe from the loc-rib
  */
 static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 {
@@ -1588,7 +1587,7 @@ static inline struct bmp_queue_entry *bmp_pull_locrib(struct bmp *bmp)
 				   &bmp->mon_loc_queuepos);
 }
 
-/* shortcut to pull a bqe from the rib-out post queue
+/* shortcut to pull a bqe from the rib-out pre/post queue
  */
 static inline struct bmp_queue_entry *bmp_pull_ribout(struct bmp *bmp)
 {
@@ -1631,8 +1630,7 @@ static inline int bmp_prefix_will_sync(struct bmp *bmp, afi_t afi, safi_t safi,
 }
 
 /* gets a bqe from the loc-rib queue and sends a bmp monitoring message for
- * loc-rib (if configured) and a bmp monitoring message for rib-out pre-policy
- * for each bgp peer.
+ * loc-rib (if configured)
  * the messages use the first selected path found in rib matching the prefix
  *
  * TODO BMP_MON_LOCRIB find a way to merge properly this function with
@@ -1706,7 +1704,7 @@ out:
 	return written;
 }
 
-/* gets a bqe from the rib-in pre/post queue and sends a bmp monitoring $
+/* gets a bqe from the rib-in pre/post queue and sends a bmp monitoring
  * message to the peer for each configured monitoring feature about the
  * first valid path found in rib for this prefix
  */
@@ -1785,8 +1783,8 @@ out:
 	return written;
 }
 
-/* gets a bqe from the rib-out post queue and sends a bmp rib-out post-policy
- * monitoring message to the peer
+/* gets a bqe from the rib-out post queue and sends a bmp rib-out
+ * pre/post-policy monitoring message to the peer
  */
 static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 {
@@ -3310,7 +3308,7 @@ static int bgp_bmp_init(struct event_loop *tm)
 
 /* this function is triggered when a route is updated is the BGP RIB
  * it puts a bmp_queue_entry in the loc-rib queue which will trigger a bmp
- * monitoring message for loc-rib AND/OR rib-out pre-policy based on config
+ * monitoring message for loc-rib based on config
  */
 static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			    struct bgp_dest *bn,
@@ -3380,10 +3378,10 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	return 0;
 }
 
-/* this function is triggered when a changed has been registered in the
- * adj-rib-out post-policy. it puts a bmp_queue_entry in the rib-out post queue
- * and which will trigger a bmp monitoring message for rib-out post-policy
- * if it is configured.
+/* this function is triggered when a change has been registered in the
+ * adj-rib-out. it puts a bmp_queue_entry in the rib-out queue
+ * and which will trigger a bmp monitoring message for rib-out pre/post-policy
+ * if either is configured.
  */
 static int bmp_adj_out_changed(struct bgp_dest *dest,
 			       struct update_subgroup *subgrp,
