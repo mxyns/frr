@@ -275,15 +275,30 @@ struct bmp_bgp_peer {
 	size_t open_tx_len;
 };
 
-/* per struct peer * data.  Lookup by peer->qobj_node.nid, created on demand,
- * deleted in peer_backward hook. */
+/* every bgp_path_info that bmp currently has locked for rib-out-prepolicy
+ * when this is allocated the bgp_path_info is locked using bgp_path_info_lock
+ * when freed unlocked using bpg_path_info_unlock
+ */
 PREDECL_HASH(bmp_lbpi);
 
 struct bmp_bpi_lock {
+	/* hashset field */
 	struct bmp_lbpi_item lbpi;
 
+	/* locked bgp_path_info */
 	struct bgp_path_info *locked;
+
+	/* main lock used to lock between loc-rib trigger (the one who locks)
+	 * and bgp_adj_out_updated (the one who unlocks)
+	 */
 	int main;
+
+	/* secondary lock, one for each bqe in the rib-out queue
+	 * when each bqe is allocated we increment this lock
+	 * when freed we decrement it
+	 * after all bqe are processed, main should be 0 and lock 0 too
+	 * so the bpi can be unlocked (and maybe freed)
+	 */
 	int lock;
 };
 
