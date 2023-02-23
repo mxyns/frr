@@ -24,6 +24,7 @@
 #include "lib/version.h"
 #include "jhash.h"
 #include "termtable.h"
+#include "time.h"
 
 #include "bgpd/bgp_table.h"
 #include "bgpd/bgpd.h"
@@ -63,6 +64,20 @@ DEFINE_MTYPE_STATIC(BMP, BMP_OPEN,	"BMP stored BGP OPEN message");
 DEFINE_MTYPE_STATIC(BMP, BMP_LBPI,	"BMP locked BPI");
 
 DEFINE_QOBJ_TYPE(bmp_targets);
+
+static struct timeval bmp_startup_time = { 0 };
+
+static uint32_t bmp_time_since_startup(struct timeval *delay) {
+
+	if (bmp_startup_time.tv_sec == 0 && bmp_startup_time.tv_usec == 0) {
+		zlog_info("bmp [%s]: Startup time not recorded", __func__);
+		return 0;
+	}
+
+	uint32_t micros = (uint32_t) (monotime_since(&bmp_startup_time, delay));
+
+	return micros / 1000;
+}
 
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
 {
@@ -1854,7 +1869,19 @@ out:
  */
 static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 {
+
+	uint32_t timeout_ms;
+	uint32_t startup_delay = bmp->targets->bmpbgp->startup_delay_ms;
 	switch(bmp->state) {
+	case BMP_StartupIdle:
+		if ((timeout_ms = bmp_time_since_startup(NULL)) < startup_delay) {
+			pullwr_timeout(pullwr, startup_delay - timeout_ms);
+			return;
+		}
+
+		zlog_info("bmp: Startup timeout expired, time since startup is %"PRIu32"ms", timeout_ms);
+		bmp->state = BMP_PeerUp;
+		// fall through
 	case BMP_PeerUp:
 		bmp_send_peerup(bmp);
 		bmp->state = BMP_Run;
@@ -2158,7 +2185,7 @@ static struct bmp *bmp_open(struct bmp_targets *bt, int bmp_sock)
 	bmp = bmp_new(bt, bmp_sock);
 	strlcpy(bmp->remote, buf, sizeof(bmp->remote));
 
-	bmp->state = BMP_PeerUp;
+	bmp->state = BMP_StartupIdle;
 	bmp->pullwr = pullwr_new(bm->master, bmp_sock, bmp, bmp_wrfill,
 			bmp_wrerr);
 	thread_add_read(bm->master, bmp_read, bmp, bmp_sock, &bmp->t_read);
@@ -2233,6 +2260,7 @@ static struct bmp_bgp *bmp_bgp_get(struct bgp *bgp)
 	bmpbgp = XCALLOC(MTYPE_BMP, sizeof(*bmpbgp));
 	bmpbgp->bgp = bgp;
 	bmpbgp->mirror_qsizelimit = ~0UL;
+	bmpbgp->startup_delay_ms = 0;
 	bmp_mirrorq_init(&bmpbgp->mirrorq);
 	bmp_bgph_add(&bmp_bgph, bmpbgp);
 
@@ -2896,14 +2924,24 @@ DEFPY(bmp_stats_cfg,
 
 DEFPY(bmp_show_locked_cfg, bmp_show_locked_cmd,
       "bmp locked",
-      "show cmd to debug locked bpi still in hash table"
+      "show cmd to debug locked bpi still in hash table\n"
 )
 {
 	struct bmp_bpi_lock* lbpi;
 	frr_each(bmp_lbpi, &bmp_lbpi, lbpi) {
+		if (!lbpi) {
+			zlog_info("no bucket");
+			continue;
+		}
+		if (!lbpi->locked) {
+			zlog_info("empty bucket");
+			continue;
+		}
 		zlog_info("bucket: contains %pRN", lbpi->locked->net);
 		vty_out(vty, "bucket: contains %pRN", lbpi->locked->net);
 	}
+
+	return CMD_SUCCESS;
 }
 
 DEFPY(bmp_monitor_cfg, bmp_monitor_cmd,
@@ -3032,6 +3070,29 @@ DEFPY(no_bmp_mirror_limit_cfg,
 
 	return CMD_SUCCESS;
 }
+
+DEFPY(bmp_startup_delay_cfg,
+      bmp_startup_delay_cmd,
+      "[no] bmp startup-delay [(0-4294967294)]$startup_delay",
+      NO_STR
+	      BMP_STR
+      "Configure delay before BMP starts sending monitoring and mirroring messages\n"
+      "Time in milliseconds\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	struct bmp_bgp *bmpbgp;
+
+	if (!no && startup_delay == 0) {
+		vty_out(vty, "Missing startup delay parameter\n");
+		return CMD_ERR_INCOMPLETE;
+	}
+
+	bmpbgp = bmp_bgp_get(bgp);
+	bmpbgp->startup_delay_ms = !no ? startup_delay : 0;
+
+	return CMD_SUCCESS;
+}
+
 
 
 DEFPY(show_bmp,
@@ -3205,6 +3266,10 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 		vty_out(vty, " !\n bmp mirror buffer-limit %zu\n",
 			bmpbgp->mirror_qsizelimit);
 
+	if (bmpbgp->startup_delay_ms != 0)
+		vty_out(vty, " !\n bmp startup-delay %"PRIu32"\n",
+			bmpbgp->startup_delay_ms);
+
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
 		vty_out(vty, " !\n bmp targets %s\n", bt->name);
 
@@ -3280,10 +3345,14 @@ static int bgp_bmp_init(struct thread_master *tm)
 
 	install_element(BGP_NODE, &bmp_mirror_limit_cmd);
 	install_element(BGP_NODE, &no_bmp_mirror_limit_cmd);
+	install_element(BGP_NODE, &bmp_startup_delay_cmd);
 
 	install_element(VIEW_NODE, &show_bmp_cmd);
 
 	resolver_init(tm);
+
+	monotime(&bmp_startup_time);
+
 	return 0;
 }
 

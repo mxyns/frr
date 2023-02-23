@@ -30,10 +30,11 @@
 #define BMP_READ_BUFSIZ	1024
 
 /* bmp->state */
-#define BMP_None        0
-#define BMP_PeerUp      2
-#define BMP_Run         3
-
+enum BMP_State {
+	BMP_StartupIdle,
+	BMP_PeerUp,
+	BMP_Run,
+};
 /* This one is for BMP Route Monitoring messages, i.e. delivering updates
  * in somewhat processed (as opposed to fully raw, see mirroring below) form.
  * RFC explicitly says that we can skip old updates if we haven't sent them out
@@ -121,7 +122,7 @@ struct bmp {
 
 	struct pullwr *pullwr;
 
-	int state;
+	enum BMP_State state;
 
 	/* queue positions must remain synced with refcounts in the items.
 	 * Whenever appending a queue item, we need to know the correct number
@@ -317,6 +318,8 @@ struct bmp_bgp {
 	size_t mirror_qsize, mirror_qsizemax;
 
 	size_t mirror_qsizelimit;
+
+	uint32_t startup_delay_ms;
 };
 
 enum {
