@@ -158,6 +158,9 @@ static int bmp_mainlock_bpi(struct bgp_path_info *bpi) {
 
 static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi) {
 
+	if (!bpi)
+		return NULL;
+
 	struct bmp_bpi_lock dummy = { .locked = bpi }, *lbpi_ptr;
 
 	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
@@ -1921,7 +1924,12 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 	bqe = bmp_qhash_find(updhash, &bqeref);
 	if (bqe) {
 		bqe->flags |= mon_flag;
-		bqe->locked_bpi = lock_bpi ? lock_bpi : bqe->locked_bpi;
+		/* swap locked bpis and un/lock pre/new bpis */
+		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
+			bmp_lock_bpi(lock_bpi);
+			bmp_unlock_bpi(bqe->locked_bpi);
+			bqe->locked_bpi = lock_bpi;
+		}
 
 		if (bqe->refcount >= refcount)
 			/* same update, not sent to anyone yet,
