@@ -1454,10 +1454,10 @@ afibreak:
 			prefix_copy(&bmp->syncpos, bgp_dest_get_prefix(bn));
 		}
 
-		if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY ||
-		    bmp->targets->afimon[afi][safi] & BMP_MON_LOC_RIB ||
-		    bmp->targets->afimon[afi][safi] & BMP_MON_OUT_PREPOLICY ||
-		    bmp->targets->afimon[afi][safi] & BMP_MON_OUT_POSTPOLICY) {
+		if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+			       BMP_MON_IN_POSTPOLICY | BMP_MON_LOC_RIB |
+				       BMP_MON_OUT_PREPOLICY |
+				       BMP_MON_OUT_POSTPOLICY)) {
 			for (bpiter = bgp_dest_get_bgp_path_info(bn); bpiter;
 			     bpiter = bpiter->next) {
 				if (!CHECK_FLAG(bpiter->flags,
@@ -1474,7 +1474,8 @@ afibreak:
 				bpi = bpiter;
 			}
 		}
-		if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
+		if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+			       BMP_MON_IN_PREPOLICY)) {
 			for (adjiter = bn->adj_in; adjiter;
 			     adjiter = adjiter->next) {
 				if (adjiter->peer->qobj_node.nid
@@ -1760,7 +1761,7 @@ static bool bmp_wrqueue_in(struct bmp *bmp, struct pullwr *pullwr)
 	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
 				  &bqe->p, prd);
 
-	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_PREPOLICY) {
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_IN_PREPOLICY)) {
 		struct bgp_adj_in *adjin;
 
 		for (adjin = bn ? bn->adj_in : NULL; adjin;
@@ -1774,7 +1775,8 @@ static bool bmp_wrqueue_in(struct bmp *bmp, struct pullwr *pullwr)
 		written = true;
 	}
 
-	if (bmp->targets->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY) {
+	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+		       BMP_MON_IN_POSTPOLICY)) {
 		struct bgp_path_info *bpi;
 
 		for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
@@ -1982,7 +1984,7 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 
 	bqe = bmp_qhash_find(updhash, &bqeref);
 	if (bqe) {
-		bqe->flags |= mon_flag;
+		SET_FLAG(bqe->flags, mon_flag);
 		/* swap locked bpis and un/lock pre/new bpis */
 		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
 			bmp_lock_bpi(lock_bpi);
@@ -2957,7 +2959,7 @@ DEFPY(bmp_stats_cfg,
 }
 
 DEFPY(bmp_show_locked_cfg, bmp_show_locked_cmd, "bmp locked",
-      "show cmd to debug locked bpi still in hash table\n")
+      BMP_STR "show cmd to debug locked bpi still in hash table\n")
 {
 	struct bmp_bpi_lock *lbpi;
 	frr_each (bmp_lbpi, &bmp_lbpi, lbpi) {
@@ -3174,23 +3176,27 @@ DEFPY(show_bmp,
 					continue;
 
 				const char *in_pre_str =
-					afimon_flag & BMP_MON_IN_PREPOLICY
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_IN_PREPOLICY)
 						? "rib-in pre-policy "
 						: "";
 				const char *in_post_str =
-					afimon_flag & BMP_MON_IN_POSTPOLICY
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_IN_POSTPOLICY)
 						? "rib-in post-policy "
 						: "";
 				const char *locrib_str =
-					afimon_flag & BMP_MON_LOC_RIB
+					CHECK_FLAG(afimon_flag, BMP_MON_LOC_RIB)
 						? "loc-rib "
 						: "";
 				const char *out_pre_str =
-					afimon_flag & BMP_MON_OUT_PREPOLICY
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_PREPOLICY)
 						? "rib-out pre-policy "
 						: "";
 				const char *out_post_str =
-					afimon_flag & BMP_MON_OUT_POSTPOLICY
+					CHECK_FLAG(afimon_flag,
+						   BMP_MON_OUT_POSTPOLICY)
 						? "rib-out post-policy"
 						: "";
 
@@ -3324,22 +3330,26 @@ static int bmp_config_write(struct bgp *bgp, struct vty *vty)
 			vty_out(vty, "  bmp mirror\n");
 
 		FOREACH_AFI_SAFI (afi, safi) {
-			if (bt->afimon[afi][safi] & BMP_MON_IN_PREPOLICY)
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_IN_PREPOLICY))
 				vty_out(vty,
 					"  bmp monitor %s %s rib-in pre-policy\n",
 					afi2str_lower(afi), safi2str(safi));
-			if (bt->afimon[afi][safi] & BMP_MON_IN_POSTPOLICY)
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_IN_POSTPOLICY))
 				vty_out(vty,
 					"  bmp monitor %s %s rib-in post-policy\n",
 					afi2str_lower(afi), safi2str(safi));
-			if (bt->afimon[afi][safi] & BMP_MON_LOC_RIB)
+			if (CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_LOC_RIB))
 				vty_out(vty, "  bmp monitor %s %s loc-rib\n",
 					afi2str_lower(afi), safi2str(safi));
-			if (bt->afimon[afi][safi] & BMP_MON_OUT_PREPOLICY)
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_PREPOLICY))
 				vty_out(vty,
 					"  bmp monitor %s %s rib-out pre-policy\n",
 					afi2str_lower(afi), safi2str(safi));
-			if (bt->afimon[afi][safi] & BMP_MON_OUT_POSTPOLICY)
+			if (CHECK_FLAG(bt->afimon[afi][safi],
+				       BMP_MON_OUT_POSTPOLICY))
 				vty_out(vty,
 					"  bmp monitor %s %s rib-out post-policy\n",
 					afi2str_lower(afi), safi2str(safi));
@@ -3502,7 +3512,7 @@ static int bmp_adj_out_changed(struct bgp_dest *dest,
 	bool is_riboutmon_enabled = false;
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
 		if ((is_riboutmon_enabled |=
-		     (bt->afimon[afi][safi] & mon_flag)))
+		     (CHECK_FLAG(bt->afimon[afi][safi], mon_flag))))
 			break;
 	}
 
