@@ -3110,6 +3110,7 @@ DEFPY(show_bmp,
 	char uptime[BGP_UPTIME_LEN];
 	char *out;
 
+	vty_out(vty, "BMP Module started at %pTVM\n\n", &bmp_startup_time);
 	frr_each(bmp_bgph, &bmp_bgph, bmpbgp) {
 		vty_out(vty, "BMP state for BGP %s:\n\n",
 				bmpbgp->bgp->name_pretty);
@@ -3122,6 +3123,11 @@ DEFPY(show_bmp,
 			vty_out(vty, "                  %9zu bytes buffer size limit\n",
 					bmpbgp->mirror_qsizelimit);
 		vty_out(vty, "\n");
+
+		vty_out(vty, "  Startup delay : %s",
+			bmpbgp->startup_delay_ms == 0 ? "Immediate\n\n" : "");
+		if (bmpbgp->startup_delay_ms != 0)
+			vty_out(vty, "%"PRIu32"ms\n\n", bmpbgp->startup_delay_ms);
 
 		frr_each(bmp_targets, &bmpbgp->targets, bt) {
 			vty_out(vty, "  Targets \"%s\":\n", bt->name);
@@ -3220,7 +3226,7 @@ DEFPY(show_bmp,
 			vty_out(vty, "\n    %zu connected clients:\n",
 					bmp_session_count(&bt->sessions));
 			tt = ttable_new(&ttable_styles[TTSTYLE_BLANK]);
-			ttable_add_row(tt, "remote|uptime|MonSent|MirrSent|MirrLost|ByteSent|ByteQ|ByteQKernel");
+			ttable_add_row(tt, "remote|uptime|state|MonSent|MirrSent|MirrLost|ByteSent|ByteQ|ByteQKernel");
 			ttable_rowseps(tt, 0, BOTTOM, true, '-');
 
 			frr_each (bmp_session, &bt->sessions, bmp) {
@@ -3232,8 +3238,9 @@ DEFPY(show_bmp,
 				peer_uptime(bmp->t_up.tv_sec, uptime,
 					    sizeof(uptime), false, NULL);
 
-				ttable_add_row(tt, "%s|%s|%Lu|%Lu|%Lu|%Lu|%zu|%zu",
+				ttable_add_row(tt, "%s|%s|%s|%Lu|%Lu|%Lu|%Lu|%zu|%zu",
 					       bmp->remote, uptime,
+					       bmp_state_str(bmp->state),
 					       bmp->cnt_update,
 					       bmp->cnt_mirror,
 					       bmp->cnt_mirror_overruns,
