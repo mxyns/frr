@@ -2038,6 +2038,25 @@ static void bmp_stat_put_u32(struct stream *s, size_t *cnt, uint16_t type,
 	(*cnt)++;
 }
 
+static void bmp_stat_put_u64(struct stream *s, size_t *cnt, uint16_t type,
+		uint64_t value)
+{
+	stream_putw(s, type);
+	stream_putw(s, 8);
+	stream_putq(s, value);
+	(*cnt)++;
+}
+
+static void bmp_stat_put_af_u64(struct stream *s, size_t *cnt, uint16_t type,
+				afi_t afi, safi_t safi, uint64_t value)
+{
+	stream_putw(s, type);
+	stream_putw(s, 2 + 1 + 8);
+	stream_put3(s, (afi_int2iana(afi) << 8) + safi_int2iana(safi));
+	stream_putq(s, value);
+	(*cnt)++;
+}
+
 static void bmp_stats(struct thread *thread)
 {
 	struct bmp_targets *bt = THREAD_ARG(thread);
@@ -2045,6 +2064,12 @@ static void bmp_stats(struct thread *thread)
 	struct peer *peer;
 	struct listnode *node;
 	struct timeval tv;
+	afi_t afi;
+	safi_t safi;
+	int afid;
+	uint64_t af_stat[AFI_MAX][SAFI_MAX];
+	struct update_subgroup *subgrp;
+
 
 	if (bt->stat_msec)
 		thread_add_timer_msec(bm->master, bmp_stats, bt, bt->stat_msec,
@@ -2055,6 +2080,7 @@ static void bmp_stats(struct thread *thread)
 	/* Walk down all peers */
 	for (ALL_LIST_ELEMENTS_RO(bt->bgp->peer, node, peer)) {
 		size_t count = 0, count_pos, len;
+		uint64_t adj_rib_out_post_size = 0;
 
 		if (!peer_established(peer))
 			continue;
@@ -2069,16 +2095,27 @@ static void bmp_stats(struct thread *thread)
 
 		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_REJECTED,
 				peer->stat_pfx_filter);
+		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_DUP_WITHDRAW,
+				 peer->stat_pfx_dup_withdraw);
+		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_CLUSTER,
+				 peer->stat_pfx_cluster_loop);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_ASPATH,
 				peer->stat_pfx_aspath_loop);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_ORIGINATOR,
 				peer->stat_pfx_originator_loop);
-		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_LOOP_CLUSTER,
-				peer->stat_pfx_cluster_loop);
-		bmp_stat_put_u32(s, &count, BMP_STATS_PFX_DUP_WITHDRAW,
-				peer->stat_pfx_dup_withdraw);
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_7606_WITHDRAW,
 				peer->stat_upd_7606);
+
+		FOREACH_AFI_SAFI(afi, safi) {
+			adj_rib_out_post_size +=
+				(af_stat[afi][safi] = ((subgrp = peer_subgroup(peer, afi, safi)) ?
+									  subgrp->pscount : 0));
+			if (af_stat[afi][safi])
+				bmp_stat_put_af_u64(s, &count, BMP_STATS_SIZE_ADJ_RIB_OUT_POST_SAFI, afi, safi, af_stat[afi][safi]);
+		};
+
+		bmp_stat_put_u64(s, &count, BMP_STATS_SIZE_ADJ_RIB_OUT_POST,
+				 adj_rib_out_post_size);
 		bmp_stat_put_u32(s, &count, BMP_STATS_FRR_NH_INVALID,
 				peer->stat_pfx_nh_invalid);
 
@@ -3383,6 +3420,11 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
+	/* lock the bpi in case of withdraw for rib-out pre-policy
+	 * do this unconditionally because adj_out_changed hook will always be
+	 * called whether rib-out mon is configured or not and this avoids problems
+	 * in case of configuration changes between lock and unlock calls
+	 */
 	if (is_withdraw)
 		bmp_mainlock_bpi(updated_route);
 
