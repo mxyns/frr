@@ -4052,7 +4052,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (!soft_reconfig
 	    && CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
 	    && peer != bgp->peer_self)
-		bgp_adj_in_set(dest, peer, attr, addpath_id);
+		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id);
 
 	/* Update permitted loop count */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_ALLOWAS_IN))
@@ -4960,7 +4960,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	 */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
 	    && peer != bgp->peer_self)
-		if (!bgp_adj_in_unset(dest, peer, addpath_id)) {
+		if (!bgp_adj_in_unset(dest, afi, safi, peer, addpath_id)) {
 			peer->stat_pfx_dup_withdraw++;
 
 			if (bgp_debug_update(peer, p, NULL, 1)) {
@@ -5550,7 +5550,7 @@ static void bgp_clear_route_table(struct peer *peer, afi_t afi, safi_t safi,
 			ain_next = ain->next;
 
 			if (ain->peer == peer)
-				bgp_adj_in_remove(dest, ain);
+				bgp_adj_in_remove(dest, afi, safi, ain);
 
 			ain = ain_next;
 		}
@@ -5657,7 +5657,7 @@ void bgp_clear_adj_in(struct peer *peer, afi_t afi, safi_t safi)
 			ain_next = ain->next;
 
 			if (ain->peer == peer)
-				bgp_adj_in_remove(dest, ain);
+				bgp_adj_in_remove(dest, afi, safi, ain);
 
 			ain = ain_next;
 		}
