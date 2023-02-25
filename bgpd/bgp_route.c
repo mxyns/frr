@@ -3269,11 +3269,19 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		}
 	}
 
-	if (old_select)
+	if (old_select) {
+		if (old_select->peer)
+			old_select->peer->stat_loc_rib_count[afi][safi]--;
+
 		bgp_path_info_unset_flag(dest, old_select, BGP_PATH_SELECTED);
+	}
 	if (new_select) {
 		if (debug)
 			zlog_debug("%s: setting SELECTED flag", __func__);
+
+		if (new_select->peer)
+			new_select->peer->stat_loc_rib_count[afi][safi]++;
+
 		bgp_path_info_set_flag(dest, new_select, BGP_PATH_SELECTED);
 		bgp_path_info_unset_flag(dest, new_select,
 					 BGP_PATH_ATTR_CHANGED);

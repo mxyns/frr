@@ -1585,6 +1585,8 @@ struct peer {
 	uint32_t stat_pfx_dup_withdraw;
 	uint32_t stat_upd_7606;  /* RFC7606: treat-as-withdraw */
 	uint32_t stat_adj_in_count[AFI_MAX][SAFI_MAX];
+	uint32_t stat_loc_rib_count[AFI_MAX][SAFI_MAX];
+	// no need for stat_adj_out_count here, it is in struct update_subgroup
 
 	/* BGP state count */
 	uint32_t established; /* Established */
