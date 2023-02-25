@@ -2141,8 +2141,8 @@ static void bmp_stats(struct event *thread)
 		bmp_stat_put_u32(s, &count, BMP_STATS_UPD_7606_WITHDRAW,
 				peer->stat_upd_7606);
 
-#define PER_AF_STAT(afi_var, safi_var, af_stat_arr, sum_var, safi_stat,        \
-		    safi_stat_call, sum_stat_call)                             \
+#define BMP_PER_AF_STAT(afi_var, safi_var, af_stat_arr, sum_var, safi_stat,    \
+			safi_stat_call, sum_stat_call)                         \
 	do {                                                                   \
 		(sum_var) = 0;                                                 \
 		FOREACH_AFI_SAFI ((afi_var), (safi_var)) {                     \
@@ -2154,26 +2154,35 @@ static void bmp_stats(struct event *thread)
 		(sum_stat_call);                                               \
 	} while (0);
 
-		PER_AF_STAT(afi, safi, af_stat, per_af_sum,
-			    ((subgrp = peer_subgroup(peer, afi, safi))
-				     ? subgrp->pscount
-				     : 0),
-			    bmp_stat_put_af_u64(
-				    s, &count,
-				    BMP_STATS_SIZE_ADJ_RIB_OUT_POST_SAFI, afi,
-				    safi, af_stat[afi][safi]),
-			    bmp_stat_put_u64(s, &count,
-					     BMP_STATS_SIZE_ADJ_RIB_OUT_POST,
-					     per_af_sum));
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			peer->stat_adj_in_count[afi][safi],
+			bmp_stat_put_af_u64(s, &count,
+					    BMP_STATS_SIZE_ADJ_RIB_IN_SAFI, afi,
+					    safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count, BMP_STATS_SIZE_ADJ_RIB_IN,
+					 per_af_sum));
 
-		PER_AF_STAT(afi, safi, af_stat, per_af_sum,
-			    peer->stat_adj_in_count[afi][safi],
-			    bmp_stat_put_af_u64(s, &count,
-						BMP_STATS_SIZE_ADJ_RIB_IN_SAFI,
-						afi, safi, af_stat[afi][safi]),
-			    bmp_stat_put_u64(s, &count,
-					     BMP_STATS_SIZE_ADJ_RIB_IN,
-					     per_af_sum));
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			peer->stat_loc_rib_count[afi][safi],
+			bmp_stat_put_af_u64(s, &count,
+					    BMP_STATS_SIZE_LOC_RIB_SAFI, afi,
+					    safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count, BMP_STATS_SIZE_LOC_RIB,
+					 per_af_sum));
+
+		BMP_PER_AF_STAT(
+			afi, safi, af_stat, per_af_sum,
+			((subgrp = peer_subgroup(peer, afi, safi))
+				 ? subgrp->pscount
+				 : 0),
+			bmp_stat_put_af_u64(
+				s, &count, BMP_STATS_SIZE_ADJ_RIB_OUT_POST_SAFI,
+				afi, safi, af_stat[afi][safi]),
+			bmp_stat_put_u64(s, &count,
+					 BMP_STATS_SIZE_ADJ_RIB_OUT_POST,
+					 per_af_sum));
 
 
 		bmp_stat_put_u32(s, &count, BMP_STATS_FRR_NH_INVALID,
