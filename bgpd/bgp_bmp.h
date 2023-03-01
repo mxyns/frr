@@ -14,20 +14,20 @@
 #include "resolver.h"
 #include "bgp_updgrp.h"
 
-#define BMP_VERSION_3	3
+#define BMP_VERSION_3 3
 
-#define BMP_LENGTH_POS  1
+#define BMP_LENGTH_POS 1
 
 /* BMP message types */
-#define BMP_TYPE_ROUTE_MONITORING       0
-#define BMP_TYPE_STATISTICS_REPORT      1
+#define BMP_TYPE_ROUTE_MONITORING	0
+#define BMP_TYPE_STATISTICS_REPORT	1
 #define BMP_TYPE_PEER_DOWN_NOTIFICATION 2
-#define BMP_TYPE_PEER_UP_NOTIFICATION   3
-#define BMP_TYPE_INITIATION             4
-#define BMP_TYPE_TERMINATION            5
-#define BMP_TYPE_ROUTE_MIRRORING        6
+#define BMP_TYPE_PEER_UP_NOTIFICATION	3
+#define BMP_TYPE_INITIATION		4
+#define BMP_TYPE_TERMINATION		5
+#define BMP_TYPE_ROUTE_MIRRORING	6
 
-#define BMP_READ_BUFSIZ	1024
+#define BMP_READ_BUFSIZ 1024
 
 /* bmp->state */
 enum BMP_State {
@@ -63,9 +63,9 @@ struct bmp_queue_entry {
 	struct bmp_qlist_item bli;
 	struct bmp_qhash_item bhi;
 
-	struct bgp_path_info *locked_bpi;
+	uint32_t addpath_id;
 
-#define BMP_QUEUE_FLAGS_NONE (0 << 0)
+#define BMP_QUEUE_FLAGS_NONE (0)
 	uint8_t flags;
 	struct prefix p;
 	uint64_t peerid;
@@ -165,8 +165,8 @@ struct bmp {
 
 PREDECL_SORTLIST_UNIQ(bmp_actives);
 
-#define BMP_DFLT_MINRETRY	30000
-#define BMP_DFLT_MAXRETRY	720000
+#define BMP_DFLT_MINRETRY 30000
+#define BMP_DFLT_MAXRETRY 720000
 
 struct bmp_active {
 	struct bmp_actives_item bai;
@@ -221,7 +221,7 @@ struct bmp_targets {
 
 	char *acl_name;
 	char *acl6_name;
-#define BMP_STAT_DEFAULT_TIMER	60000
+#define BMP_STAT_DEFAULT_TIMER 60000
 	int stat_msec;
 
 	/* only supporting:
@@ -229,10 +229,10 @@ struct bmp_targets {
 	 * - IPv6 / unicast & multicast & VPN
 	 * - L2VPN / EVPN
 	 */
-#define BMP_MON_IN_PREPOLICY (1 << 0)
-#define BMP_MON_IN_POSTPOLICY (1 << 1)
-#define BMP_MON_LOC_RIB (1 << 2)
-#define BMP_MON_OUT_PREPOLICY (1 << 3)
+#define BMP_MON_IN_PREPOLICY   (1 << 0)
+#define BMP_MON_IN_POSTPOLICY  (1 << 1)
+#define BMP_MON_LOC_RIB	       (1 << 2)
+#define BMP_MON_OUT_PREPOLICY  (1 << 3)
 #define BMP_MON_OUT_POSTPOLICY (1 << 4)
 
 
@@ -280,38 +280,70 @@ struct bmp_bgp_peer {
  * when this is allocated the bgp_path_info is locked using bgp_path_info_lock
  * when freed unlocked using bpg_path_info_unlock
  */
-PREDECL_HASH(bmp_lbpi);
+PREDECL_HASH(bmp_lbpi_h);
 
 struct bmp_bpi_lock {
 	/* hashset field */
-	struct bmp_lbpi_item lbpi;
+	struct bmp_lbpi_h_item lbpi_h;
+	struct bmp_bpi_lock *next;
 
+	/* bgp instance associated with bpi and dest
+	 * needed for differentiation between vrfs/views
+	 */
+	struct bgp *bgp;
 	/* locked bgp_path_info */
 	struct bgp_path_info *locked;
+	/* dest of locked bgp_path_info for lookup */
+	struct bgp_dest *dest;
 
-	/* main lock used to lock between loc-rib trigger (the one who locks)
-	 * and bgp_adj_out_updated (the one who unlocks)
-	 */
-	int main;
-
-	/* secondary lock, one for each bqe in the rib-out queue
+	/* lock, one for each bqe in the rib-out queue
 	 * when each bqe is allocated we increment this lock
 	 * when freed we decrement it
-	 * after all bqe are processed, main should be 0 and lock 0 too
+	 * after all bqe are processed, it should be 0
 	 * so the bpi can be unlocked (and maybe freed)
 	 */
 	int lock;
 };
 
+
+#define BMP_LBPI_LOOKUP_DEST(head, prev, lookup, target_dest, target_bgp,      \
+			     condition)                                        \
+	struct bmp_bpi_lock _dummy_lbpi = {                                    \
+		.dest = (target_dest),                                         \
+		.bgp = (target_bgp),                                           \
+	};                                                                     \
+									\
+	struct bmp_bpi_lock *(head) = NULL, *(prev) = NULL, *(lookup) = NULL;  \
+									\
+	(head) = bmp_lbpi_h_find(&bmp_lbpi, &_dummy_lbpi);                     \
+									\
+	for ((lookup) = (head); (lookup);                                      \
+	     (lookup) = ((prev) = (lookup))->next) {                           \
+		if ((condition))                                               \
+			break;                                                 \
+	}
+
+#define BMP_LBPI_LOOKUP_BPI(head, prev, lookup, target_bpi, target_bgp)        \
+	BMP_LBPI_LOOKUP_DEST((head), (prev), (lookup), (target_bpi)->net,      \
+			     (target_bgp), ((lookup)->locked == (target_bpi)))
 /* per struct bgp * data */
 PREDECL_HASH(bmp_bgph);
 
 #define BMP_PEER_DOWN_NO_RELEVANT_EVENT_CODE 0x00
 
+enum bmp_vrf_state {
+	vrf_state_down = -1,
+	vrf_state_unknown = 0,
+	vrf_state_up = 1,
+};
+
 struct bmp_bgp {
 	struct bmp_bgph_item bbi;
 
 	struct bgp *bgp;
+
+	enum bmp_vrf_state vrf_up;
+
 	struct bmp_targets_head targets;
 
 	struct bmp_mirrorq_head mirrorq;
@@ -322,12 +354,16 @@ struct bmp_bgp {
 	uint32_t startup_delay_ms;
 };
 
+extern bool bmp_bgp_update_vrf_status(struct bmp_bgp *bmpbgp,
+				      enum bmp_vrf_state force);
+
 enum {
-	BMP_PEERDOWN_LOCAL_NOTIFY       = 1,
-	BMP_PEERDOWN_LOCAL_FSM          = 2,
-	BMP_PEERDOWN_REMOTE_NOTIFY      = 3,
-	BMP_PEERDOWN_REMOTE_CLOSE       = 4,
-	BMP_PEERDOWN_ENDMONITOR         = 5,
+	BMP_PEERDOWN_LOCAL_NOTIFY = 1,
+	BMP_PEERDOWN_LOCAL_FSM = 2,
+	BMP_PEERDOWN_REMOTE_NOTIFY = 3,
+	BMP_PEERDOWN_REMOTE_CLOSE = 4,
+	BMP_PEERDOWN_ENDMONITOR = 5,
+	BMP_PEERDOWN_LOCAL_TLV = 6,
 };
 
 enum {

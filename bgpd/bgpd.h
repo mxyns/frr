@@ -839,6 +839,7 @@ DECLARE_HOOK(bgp_inst_config_write,
 		(bgp, vty));
 DECLARE_HOOK(bgp_snmp_traps_config_write, (struct vty *vty), (vty));
 DECLARE_HOOK(bgp_config_end, (struct bgp *bgp), (bgp));
+DECLARE_HOOK(bgp_instance_state, (struct bgp *bgp), (bgp));
 
 /* Thread callback information */
 struct afi_safi_info {
