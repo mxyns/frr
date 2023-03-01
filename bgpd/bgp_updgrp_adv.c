@@ -36,10 +36,10 @@
 #include "bgpd/bgp_addpath.h"
 
 DEFINE_HOOK(bgp_adj_out_updated,
-	    (struct bgp_dest * dest, struct update_subgroup *subgrp,
-	     struct attr *attr, struct bgp_path_info *path, bool post_policy,
-	     bool withdraw),
-	    (dest, subgrp, attr, path, post_policy, withdraw));
+	    (struct bgp_dest * dest, uint32_t addpath_id,
+	     struct update_subgroup *subgrp, struct attr *attr,
+	     struct bgp_path_info *path, bool post_policy, bool withdraw),
+	    (dest, addpath_id, subgrp, attr, path, post_policy, withdraw));
 
 /********************
  * PRIVATE FUNCTIONS
@@ -455,8 +455,8 @@ void bgp_adj_out_updated(struct bgp_dest *dest, struct update_subgroup *subgrp,
 {
 
 	if (post_policy) {
-		hook_call(bgp_adj_out_updated, dest, subgrp, attr, NULL, true,
-			  withdraw);
+		hook_call(bgp_adj_out_updated, dest, 0, subgrp, attr, NULL,
+			  true, withdraw);
 		return;
 	}
 
@@ -486,7 +486,7 @@ void bgp_adj_out_updated(struct bgp_dest *dest, struct update_subgroup *subgrp,
 	if (!pre_check)
 		return;
 
-	hook_call(bgp_adj_out_updated, dest, subgrp, attr, path, false,
+	hook_call(bgp_adj_out_updated, dest, 0, subgrp, attr, path, false,
 		  withdraw);
 }
 
