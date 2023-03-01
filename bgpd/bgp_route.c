@@ -114,8 +114,8 @@ static const struct message bgp_pmsi_tnltype_str[] = {
 
 DEFINE_HOOK(bgp_process,
 	    (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	     struct peer *peer, bool is_locribmon_enabled),
-	    (bgp, afi, safi, bn, peer, is_locribmon_enabled));
+	     uint32_t addpath_id, struct peer *peer, bool withdraw),
+	    (bgp, afi, safi, bn, addpath_id, peer, withdraw));
 
 /** Test if path is suppressed. */
 static bool bgp_path_suppressed(struct bgp_path_info *pi)
@@ -3760,7 +3760,8 @@ void bgp_rib_remove(struct bgp_dest *dest, struct bgp_path_info *pi,
 		}
 	}
 
-	hook_call(bgp_process, peer->bgp, afi, safi, dest, peer, true);
+	hook_call(bgp_process, peer->bgp, afi, safi, dest,
+		  pi ? pi->addpath_rx_id : 0, peer, true);
 	bgp_process(peer->bgp, dest, afi, safi);
 }
 
@@ -4309,7 +4310,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		pi->uptime = monotime(NULL);
 		same_attr = attrhash_cmp(pi->attr, attr_new);
 
-		hook_call(bgp_process, bgp, afi, safi, dest, peer, true);
+		hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true);
 
 		/* Same attribute comes in. */
 		if (!CHECK_FLAG(pi->flags, BGP_PATH_REMOVED)
@@ -4833,7 +4834,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (safi == SAFI_EVPN && CHECK_FLAG(new->flags, BGP_PATH_VALID))
 		bgp_evpn_import_route(bgp, afi, safi, p, new);
 
-	hook_call(bgp_process, bgp, afi, safi, dest, peer, false);
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
 
 	/* Process change. */
 	bgp_process(bgp, dest, afi, safi);
@@ -4879,7 +4880,7 @@ filtered:
 		XFREE(MTYPE_BGP_ROUTE, new);
 	}
 
-	hook_call(bgp_process, bgp, afi, safi, dest, peer, true);
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true);
 
 	if (bgp_debug_update(peer, p, NULL, 1)) {
 		if (!peer->rcvd_attr_printed) {

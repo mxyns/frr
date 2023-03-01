@@ -36,20 +36,6 @@ enum BMP_State {
 	BMP_Run,
 };
 
-static const char *bmp_state_str(enum BMP_State state) {
-	switch (state) {
-
-	case BMP_StartupIdle:
-		return "Startup-Wait";
-	case BMP_PeerUp:
-		return "Peer-Up";
-	case BMP_Run:
-		return "Running";
-	default:
-		return "Unknown";
-	}
-}
-
 /* This one is for BMP Route Monitoring messages, i.e. delivering updates
  * in somewhat processed (as opposed to fully raw, see mirroring below) form.
  * RFC explicitly says that we can skip old updates if we haven't sent them out
@@ -78,6 +64,7 @@ struct bmp_queue_entry {
 	struct bmp_qhash_item bhi;
 
 	struct bgp_path_info *locked_bpi;
+	uint32_t addpath_id;
 
 #define BMP_QUEUE_FLAGS_NONE (0 << 0)
 	uint8_t flags;
