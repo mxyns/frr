@@ -2909,7 +2909,7 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	 */
 	advertise = bgp_check_advertise(bgp, dest);
 
-	bgp_adj_out_updated(dest, subgrp, &attr, selected, false,
+	bgp_adj_out_updated(subgrp, dest, selected, addpath_tx_id, &attr, false,
 			    selected && advertise ? false : true, __func__);
 
 	if (selected) {

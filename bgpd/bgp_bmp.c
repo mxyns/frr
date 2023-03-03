@@ -39,6 +39,7 @@
 #include "bgpd/bgp_vty.h"
 #include "bgpd/bgp_trace.h"
 #include "bgpd/bgp_network.h"
+#include "bgp_addpath.h"
 
 static void bmp_close(struct bmp *bmp);
 static struct bmp_bgp *bmp_bgp_find(struct bgp *bgp);
@@ -1811,7 +1812,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 	afi_t afi = bqe->afi;
 	safi_t safi = bqe->safi;
-
+	uint32_t addpath_tx_id = bqe->addpath_id;
 
 	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi], BMP_MON_OUT_POSTPOLICY
 			| BMP_MON_OUT_PREPOLICY)) {
@@ -1841,17 +1842,33 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 		struct bgp_path_info *bpi = bqe->locked_bpi;
 
+		zlog_info("%s: rib-out pre locked bpi %p, tx_id=%"PRIu32", looking for %"PRIu32, __func__, bpi, bpi ? bgp_addpath_id_for_peer(peer, afi, safi, &bpi->tx_addpath) : 0, addpath_tx_id);
+
 		if (!bpi) {
 			for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL;
-			     bpi; bpi = bpi->next)
-				if (CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED))
+			     bpi; bpi = bpi->next) {
+				zlog_info("%s: checking %p from peer=%pBP and for peer=%pBP tx_id=%"PRIu32, __func__, bpi, bpi->peer, peer, bgp_addpath_id_for_peer(peer, afi, safi, &bpi->tx_addpath));
+				if (addpath_tx_id !=
+				    bgp_addpath_id_for_peer(peer, afi, safi,
+							    &bpi->tx_addpath))
+					continue;
+				if (CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED)) {
+					zlog_info("%s: path selected", __func__);
 					break;
+				} else {
+					zlog_info("%s: path not selected, flags=%"PRIu32, __func__, bpi->flags);
+				}
+			}
 		}
+
+		if (bpi)
+			zlog_info("%s: selected %p from peer=%pBP and tx_id=%"PRIu32, __func__, bpi, bpi->peer, bgp_addpath_id_for_peer(peer, afi, safi, &bpi->tx_addpath));
+		else zlog_info("%s: no bpi selected", __func__);
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    !bqe->locked_bpi && bpi ? bpi->attr : NULL, afi,
-			    safi, 0, monotime(NULL));
+			    safi, addpath_tx_id, monotime(NULL));
 
 		written = true;
 	}
@@ -1861,7 +1878,10 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		struct bgp_adj_out *adj;
 		struct attr *advertised_attr;
 
-		adj = adj_lookup(bn, peer_subgroup(peer, afi, safi), 0);
+		adj = adj_lookup(bn, peer_subgroup(peer, afi, safi), addpath_tx_id);
+
+		zlog_info("%s: rib-out post adj %p, tx_id=%"PRIu32", looking for %"PRIu32, __func__, adj, adj ? adj->addpath_tx_id : 0, addpath_tx_id);
+
 		advertised_attr =
 			adj ?
 			    !adj->adv ? adj->attr
@@ -1871,7 +1891,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
-			    advertised_attr, afi, safi, 0, monotime(NULL));
+			    advertised_attr, afi, safi, addpath_tx_id, monotime(NULL));
 
 		written = true;
 	}
@@ -3545,9 +3565,13 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
  * and which will trigger a bmp monitoring message for rib-out pre/post-policy
  * if either is configured.
  */
-static int bmp_adj_out_changed(struct bgp_dest *dest, uint32_t addpath_id,
-	   struct update_subgroup *subgrp, struct attr *attr,
-	   struct bgp_path_info *locked_path, bool post_policy, bool withdraw) {
+static int bmp_adj_out_changed(struct update_subgroup *subgrp,
+			       struct bgp_dest *dest,
+			       struct bgp_path_info *locked_path,
+			       uint32_t addpath_id, struct attr *attr,
+			       bool post_policy, bool withdraw) {
+
+	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d", __func__, (int)(subgrp ? subgrp->id : -1), dest, locked_path, addpath_id, attr, post_policy, withdraw);
 
 	if (!subgrp) {
 		zlog_debug("%s: no subgrp, bmp rib-out post will not proceed", __func__);
@@ -3569,16 +3593,6 @@ static int bmp_adj_out_changed(struct bgp_dest *dest, uint32_t addpath_id,
 	if (post_policy || !withdraw)
 		locked_path = NULL;
 
-	bool is_riboutmon_enabled = false;
-	frr_each (bmp_targets, &bmpbgp->targets, bt) {
-		if ((is_riboutmon_enabled |=
-		     (CHECK_FLAG(bt->afimon[afi][safi], mon_flag))))
-			break;
-	}
-
-	if (!is_riboutmon_enabled)
-		goto out;
-
 	struct peer_af *paf;
 	struct peer *peer;
 	struct bmp *bmp;
@@ -3589,9 +3603,10 @@ static int bmp_adj_out_changed(struct bgp_dest *dest, uint32_t addpath_id,
 		SUBGRP_FOREACH_PEER (subgrp, paf) {
 			peer = PAF_PEER(paf);
 
+			zlog_info("%s: adding bqe for peer=%pBP in subgrp=%"PRIu64", monflag=%d, dest=%pRN, tx_id=%"PRIu32, __func__, peer, subgrp->id, mon_flag, dest, addpath_id);
 			struct bmp_queue_entry *last_item = bmp_process_one(
 				bt, &bt->mon_out_updhash, &bt->mon_out_updlist,
-				NULL, afi, safi, dest, 0, peer, mon_flag,
+				NULL, afi, safi, dest, addpath_id, peer, mon_flag,
 				locked_path);
 
 			// if bmp_process_one returns NULL
