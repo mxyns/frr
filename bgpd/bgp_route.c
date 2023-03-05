@@ -114,8 +114,12 @@ static const struct message bgp_pmsi_tnltype_str[] = {
 
 DEFINE_HOOK(bgp_process,
 	    (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	     uint32_t addpath_id, struct peer *peer, bool withdraw),
-	    (bgp, afi, safi, bn, addpath_id, peer, withdraw));
+	     uint32_t addpath_id, struct peer *peer, bool post),
+	    (bgp, afi, safi, bn, addpath_id, peer, post));
+
+DEFINE_HOOK(bgp_process_main_one,
+	    (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *dest),
+	    (bgp, afi, safi, dest));
 
 /** Test if path is suppressed. */
 static bool bgp_path_suppressed(struct bgp_path_info *pi)
@@ -3134,6 +3138,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		return;
 	}
 
+	hook_call(bgp_process_main_one, bgp, afi, safi, dest);
+
 	/* Best path selection. */
 	bgp_best_selection(bgp, dest, &bgp->maxpaths[afi][safi], &old_and_new,
 			   afi, safi);
@@ -4834,7 +4840,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (safi == SAFI_EVPN && CHECK_FLAG(new->flags, BGP_PATH_VALID))
 		bgp_evpn_import_route(bgp, afi, safi, p, new);
 
-	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true);
 
 	/* Process change. */
 	bgp_process(bgp, dest, afi, safi);
@@ -4880,7 +4886,7 @@ filtered:
 		XFREE(MTYPE_BGP_ROUTE, new);
 	}
 
-	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true);
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
 
 	if (bgp_debug_update(peer, p, NULL, 1)) {
 		if (!peer->rcvd_attr_printed) {

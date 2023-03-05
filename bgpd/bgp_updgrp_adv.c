@@ -467,7 +467,7 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 		zlog_info("%s: looking for bmp held path", __func__);
 		for (path = dest ? bgp_dest_get_bgp_path_info(dest) : NULL; path;
 		     path = path->next) {
-			if (CHECK_FLAG(path->flags, BGP_BMP_HELD) && addpath_tx == bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath)) {
+			if (CHECK_FLAG(path->flags, BGP_PATH_BMP_LOCKED) && addpath_tx == bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath)) {
 				break;
 			} else {
 				zlog_info("%s: path bpi=%p tx_id=%d, from=%pBP doesnt match", __func__, path, bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath), path->peer);
