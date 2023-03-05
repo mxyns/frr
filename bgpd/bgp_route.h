@@ -301,7 +301,8 @@ struct bgp_path_info {
 #define BGP_PATH_ANNC_NH_SELF (1 << 14)
 #define BGP_PATH_LINK_BW_CHG (1 << 15)
 #define BGP_PATH_ACCEPT_OWN (1 << 16)
-#define BGP_BMP_HELD (1 << 17)
+#define BGP_PATH_BMP_LOCKED (1 << 17)
+#define BGP_PATH_BMP_ADJ_CHG (1 << 18)
 
 	/* BGP route type.  This can be static, RIP, OSPF, BGP etc.  */
 	uint8_t type;
@@ -643,8 +644,13 @@ static inline bool bgp_check_withdrawal(struct bgp *bgp, struct bgp_dest *dest)
 /* called before bgp_process() */
 DECLARE_HOOK(bgp_process,
 	     (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	      uint32_t addpath_id, struct peer *peer, bool withdraw),
-	     (bgp, afi, safi, bn, addpath_id, peer, withdraw));
+	      uint32_t addpath_id, struct peer *peer, bool post),
+	     (bgp, afi, safi, bn, addpath_id, peer, post));
+
+/* called before bgp_process() */
+DECLARE_HOOK(bgp_process_main_one,
+	     (struct bgp * bgp, afi_t afi, safi_t safi, struct bgp_dest *dest),
+	     (bgp, afi, safi, dest));
 
 /* called when a route is updated in the rib */
 DECLARE_HOOK(bgp_route_update,

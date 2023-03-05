@@ -36,8 +36,9 @@
 #include "bgpd/bgp_addpath.h"
 
 DEFINE_HOOK(bgp_adj_out_updated,
-	    (struct update_subgroup *subgrp, struct bgp_dest *dest, struct bgp_path_info *path,
-	     uint32_t addpath_id, struct attr *attr, bool post_policy, bool withdraw),
+	    (struct update_subgroup * subgrp, struct bgp_dest *dest,
+	     struct bgp_path_info *path, uint32_t addpath_id, struct attr *attr,
+	     bool post_policy, bool withdraw),
 	    (subgrp, dest, path, addpath_id, attr, post_policy, withdraw));
 
 /********************
@@ -455,12 +456,14 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 			 const char *caller)
 {
 
-	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d, from=%s", __func__, (int)(subgrp ? subgrp->id : -1), dest, path, addpath_tx, attr, post_policy, withdraw, caller);
+	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%" PRIu32
+		  ", attr=%p, post=%d, withdraw=%d, from=%s",
+		  __func__, (int)(subgrp ? subgrp->id : -1), dest, path,
+		  addpath_tx, attr, post_policy, withdraw, caller);
 
 	if (post_policy) {
-		hook_call(bgp_adj_out_updated, subgrp, dest, NULL,
-			  addpath_tx, attr,
-			  true, withdraw);
+		hook_call(bgp_adj_out_updated, subgrp, dest, NULL, addpath_tx,
+			  attr, true, withdraw);
 		return;
 	}
 
@@ -468,10 +471,23 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 		zlog_info("%s: looking for bmp held path", __func__);
 		for (path = dest ? bgp_dest_get_bgp_path_info(dest) : NULL;
 		     path; path = path->next) {
-			if (CHECK_FLAG(path->flags, BGP_BMP_HELD) && addpath_tx == bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath)) {
+			if (CHECK_FLAG(path->flags, BGP_PATH_BMP_LOCKED) &&
+			    addpath_tx == bgp_addpath_id_for_peer(
+						  SUBGRP_PEER(subgrp),
+						  SUBGRP_AFI(subgrp),
+						  SUBGRP_SAFI(subgrp),
+						  &path->tx_addpath)) {
 				break;
 			} else {
-				zlog_info("%s: path bpi=%p tx_id=%d, from=%pBP doesnt match", __func__, path, bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath), path->peer);
+				zlog_info(
+					"%s: path bpi=%p tx_id=%d, from=%pBP doesnt match",
+					__func__, path,
+					bgp_addpath_id_for_peer(
+						SUBGRP_PEER(subgrp),
+						SUBGRP_AFI(subgrp),
+						SUBGRP_SAFI(subgrp),
+						&path->tx_addpath),
+					path->peer);
 			}
 		}
 
@@ -623,8 +639,8 @@ void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 
 	subgrp->version = MAX(subgrp->version, dest->version);
 
-	bgp_adj_out_updated(subgrp, dest, path, adj->addpath_tx_id,
-			    attr, true, false, __func__);
+	bgp_adj_out_updated(subgrp, dest, path, adj->addpath_tx_id, attr, true,
+			    false, __func__);
 }
 
 /* The only time 'withdraw' will be false is if we are sending
@@ -675,7 +691,8 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 			if (trigger_write)
 				subgroup_trigger_write(subgrp);
 
-			bgp_adj_out_updated(subgrp, dest, NULL, adj->addpath_tx_id, NULL, true,
+			bgp_adj_out_updated(subgrp, dest, NULL,
+					    adj->addpath_tx_id, NULL, true,
 					    withdraw, __func__);
 		} else {
 			/* Free allocated information.  */
@@ -763,7 +780,13 @@ void subgroup_announce_table(struct update_subgroup *subgrp,
 						safi_rib))
 				continue;
 
-			bgp_adj_out_updated(subgrp, dest, ri, !addpath_capable ? 0 : bgp_addpath_id_for_peer(peer, afi, safi, &ri->tx_addpath) , &attr, false,
+			bgp_adj_out_updated(subgrp, dest, ri,
+					    !addpath_capable
+						    ? 0
+						    : bgp_addpath_id_for_peer(
+							      peer, afi, safi,
+							      &ri->tx_addpath),
+					    &attr, false,
 					    advertise ? false : true, __func__);
 
 			if (subgroup_announce_check(dest, ri, subgrp, dest_p,

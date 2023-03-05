@@ -60,8 +60,9 @@
 	 | PEER_CAP_ENHE_AF_NEGO)
 
 DECLARE_HOOK(bgp_adj_out_updated,
-	     (struct update_subgroup *subgrp, struct bgp_dest *dest, struct bgp_path_info *path,
-	      uint32_t addpath_id, struct attr *attr, bool post_policy, bool withdraw),
+	     (struct update_subgroup * subgrp, struct bgp_dest *dest,
+	      struct bgp_path_info *path, uint32_t addpath_id,
+	      struct attr *attr, bool post_policy, bool withdraw),
 	     (subgrp, dest, path, addpath_id, attr, post_policy, withdraw));
 
 enum bpacket_attr_vec_type { BGP_ATTR_VEC_NH = 0, BGP_ATTR_VEC_MAX };
