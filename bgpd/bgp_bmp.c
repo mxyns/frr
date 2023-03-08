@@ -1705,10 +1705,11 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		zlog_info("%s: is the right one", __func__);
 
 		if (CHECK_FLAG(flags, BMP_MON_LOC_RIB)
-		    && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED)) {
+		    && CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED
+						      | BGP_PATH_MULTIPATH)) {
 
 			bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
-				    &bqe->p, prd, bpi->attr, afi, safi, 0,
+				    &bqe->p, prd, bpi->attr, afi, safi, addpath_rx_id,
 				    bpi->extra ? bpi->extra->bgp_rib_uptime
 						      : (time_t)(-1L));
 			locrib = bpi;
@@ -1736,7 +1737,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	    && CHECK_FLAG(bqe->flags, BMP_MON_LOC_RIB)
 	    && !locrib) {
 		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
-			    &bqe->p, prd, NULL, afi, safi, 0,
+			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
 			    (time_t)(-1L));
 		written = true;
 	}
@@ -3602,6 +3603,8 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
+	if (old_route) zlog_info("%s: bn %pRN old (rx %"PRIu32")", __func__, bn, old_route->addpath_rx_id);
+	if (new_route) zlog_info("%s: bn %pRN new (rx %"PRIu32")", __func__,  bn, new_route->addpath_rx_id);
 	/* lock the bpi in case of withdraw for rib-out pre-policy
 	 * do this unconditionally because adj_out_changed hook will always be
 	 * called whether rib-out mon is configured or not and this avoids problems
@@ -3621,6 +3624,8 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	if (!is_locribmon_enabled)
 		return 0;
 
+	zlog_info("loc rib mon is enabled");
+
 	/* route is not installed in loc-rib anymore and rib uptime was saved */
 	if (old_route && old_route->extra)
 		bgp_path_info_extra_get(old_route)->bgp_rib_uptime =
@@ -3638,10 +3643,12 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 			       BMP_MON_LOC_RIB))
 			continue;
 
+		zlog_info("queueing bqe for %pRN %"PRIu32, bn, updated_route->addpath_rx_id);
+
 		struct bmp_queue_entry *last_item = bmp_process_one(
 			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
 			afi, safi, bn, updated_route->addpath_rx_id,
-			peer, BMP_QUEUE_FLAGS_NONE, NULL);
+			peer, BMP_MON_LOC_RIB, NULL);
 
 		// if bmp_process_one returns NULL
 		// we don't have anything to do next

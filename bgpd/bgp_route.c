@@ -2631,10 +2631,66 @@ static void bgp_route_select_timer_expire(struct thread *thread)
 	bgp_best_path_select_defer(bgp, afi, safi);
 }
 
+
+static void bgp_show_path_flags(struct bgp_path_info *bpi) {
+	const char *names[19] = {"BGP_PATH_IGP_CHANGED",
+				 "BGP_PATH_DAMPED",
+				 "BGP_PATH_HISTORY",
+				 "BGP_PATH_SELECTED",
+				 "BGP_PATH_VALID",
+				 "BGP_PATH_ATTR_CHANGED",
+				 "BGP_PATH_DMED_CHECK",
+				 "BGP_PATH_DMED_SELECTED",
+				 "BGP_PATH_STALE",
+				 "BGP_PATH_REMOVED",
+				 "BGP_PATH_COUNTED",
+				 "BGP_PATH_MULTIPATH",
+				 "BGP_PATH_MULTIPATH_CHG",
+				 "BGP_PATH_RIB_ATTR_CHG",
+				 "BGP_PATH_ANNC_NH_SELF",
+				 "BGP_PATH_LINK_BW_CHG",
+				 "BGP_PATH_ACCEPT_OWN",
+				 "BGP_PATH_BMP_LOCKED",
+				 "BGP_PATH_BMP_ADJ_CHG"};
+
+	if (!bpi) {
+		zlog_info("%s: bpi is null", __func__);
+		return;
+	}
+
+	zlog_info("%s: bpi frmo peer=%pBP rx=%"PRIu32, __func__, bpi->peer, bpi->addpath_rx_id);
+
+	for (int index = 0; index < 19; index++) {
+		if (CHECK_FLAG(bpi->flags, (1 << index)))
+			zlog_info("%s: flag %s", __func__, names[index]);
+	}
+}
+
+static void bgp_show_mpath_info(struct bgp_path_info *bpi) {
+
+	if (!bpi) {
+		zlog_info("%s: bpi is null", __func__);
+		return;
+	}
+
+	if (!bpi->mpath) {
+		zlog_info("%s: mpath is null", __func__);
+		return;
+	}
+
+	for (struct bgp_path_info_mpath* mpath = bpi->mpath; mpath; mpath = mpath->mp_next) {
+		zlog_info(
+			"%s: mp_count=%"PRIu16", mp_flags=%"PRIu16", mp_info=%p, mp_info_rx=%d",
+			__func__, mpath->mp_count, mpath->mp_flags, mpath->mp_info, (int)(mpath->mp_info ? mpath->mp_info->addpath_rx_id : -1));
+		bgp_show_path_flags(mpath->mp_info);
+	}
+}
+
 void bgp_best_selection(struct bgp *bgp, struct bgp_dest *dest,
 			struct bgp_maxpaths_cfg *mpath_cfg,
 			struct bgp_path_info_pair *result, afi_t afi,
-			safi_t safi)
+			safi_t safi,
+			struct bgp_mpath_diff_head *mpath_diff_list)
 {
 	struct bgp_path_info *new_select;
 	struct bgp_path_info *old_select;
@@ -2750,8 +2806,11 @@ void bgp_best_selection(struct bgp *bgp, struct bgp_dest *dest,
 			 * selected route must stay for a while longer though
 			 */
 			if (CHECK_FLAG(pi->flags, BGP_PATH_REMOVED)
-			    && (pi != old_select))
+			    && (pi != old_select)) {
+				bgp_mpath_diff_insert(mpath_diff_list,
+							   pi, 0);
 				bgp_path_info_reap(dest, pi);
+			}
 
 			if (debug)
 				zlog_debug("%s: pi %p in holddown", __func__,
@@ -2858,8 +2917,16 @@ void bgp_best_selection(struct bgp *bgp, struct bgp_dest *dest,
 		}
 	}
 
+	zlog_info("%s: before DP old_select flags", __func__);
+	bgp_show_path_flags(old_select);
+	bgp_show_mpath_info(old_select);
+
+	zlog_info("%s: after DP new_select flags", __func__);
+	bgp_show_path_flags(new_select);
+	bgp_show_mpath_info(new_select);
+
 	bgp_path_info_mpath_update(bgp, dest, new_select, old_select, &mp_list,
-				   mpath_cfg);
+				   mpath_cfg, mpath_diff_list);
 	bgp_path_info_mpath_aggregate_update(new_select, old_select);
 	bgp_mp_list_clear(&mp_list);
 
@@ -3139,12 +3206,23 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	}
 
 	hook_call(bgp_process_main_one, bgp, afi, safi, dest);
+	struct bgp_mpath_diff_head mpath_diff;
+	bgp_mpath_diff_init(&mpath_diff);
+
+	// zlog_info("%s: all bpi info", __func__);
+	// for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi=bpi->next) {
+	// 	zlog_info("%s: bpi %p from %pBP rx_id=%"PRIu32, __func__, bpi, bpi->peer, bpi->addpath_rx_id);
+	// 	bgp_show_path_flags(bpi);
+	// 	bgp_show_mpath_info(bpi);
+	// }
 
 	/* Best path selection. */
 	bgp_best_selection(bgp, dest, &bgp->maxpaths[afi][safi], &old_and_new,
-			   afi, safi);
+			   afi, safi, &mpath_diff);
 	old_select = old_and_new.old;
 	new_select = old_and_new.new;
+
+	zlog_info("BGP DP DONE");
 
 	/* Do we need to allocate or free labels?
 	 * Right now, since we only deal with per-prefix labels, it is not
@@ -3195,6 +3273,44 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 			"%s: p=%pBD(%s) afi=%s, safi=%s, old_select=%p, new_select=%p",
 			__func__, dest, bgp->name_pretty, afi2str(afi),
 			safi2str(safi), old_select, new_select);
+
+
+	struct bgp_path_info_mpath_diff *diff;
+	/* call bmp hook for loc-rib route update / withdraw after flags were
+	 * set
+	 */
+	if (old_select || new_select) {
+		hook_call(bgp_route_update, bgp, afi, safi, dest, old_select,
+			  new_select);
+	}
+
+	if (old_select)
+		zlog_info("old_select %p, dest=%p, rx_id=%"PRIu32", peer=%pBP", old_select, old_select->net, old_select->addpath_rx_id, old_select->peer);
+	else
+		zlog_info("old_select null");
+
+	if (new_select)
+		zlog_info("new_select %p, dest=%p, rx_id=%"PRIu32", peer=%pBP", new_select, new_select->net, new_select->addpath_rx_id, new_select->peer);
+	else
+		zlog_info("new_select null");
+
+	zlog_info("%s: multipath diff %p computed, mpath_changed=%d", __func__, &mpath_diff, (int)bgp_mpath_diff_count(&mpath_diff));
+	frr_each (bgp_mpath_diff, &mpath_diff, diff) {
+		if (!diff->path)
+			zlog_info("[%s] diff: %p ", diff->update ? "+" : "-", diff);
+		else {
+			zlog_info(
+				"[%s] bpi: %p, dest=%pRN peer=%pBP, rx_id=%" PRIu32,
+				diff->update ? "+" : "-", diff->path,
+				diff->path->net, diff->path->peer,
+				diff->path->addpath_rx_id);
+
+			hook_call(bgp_route_update, bgp, afi, safi, dest, old_select, diff->path);
+		}
+	}
+
+	bgp_mpath_diff_clear(&mpath_diff);
+	bgp_mpath_diff_fini(&mpath_diff);
 
 	/* If best route remains the same and this is not due to user-initiated
 	 * clear, see exactly what needs to be done.
@@ -3254,6 +3370,8 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(old_select->flags, BGP_PATH_LINK_BW_CHG);
 		bgp_zebra_clear_route_change_flags(dest);
 		UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
+
+		zlog_info("BGP DP EARLY OUT");
 		return;
 	}
 
@@ -3294,15 +3412,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(new_select->flags, BGP_PATH_MULTIPATH_CHG);
 		UNSET_FLAG(new_select->flags, BGP_PATH_LINK_BW_CHG);
 	}
-
-	/* call bmp hook for loc-rib route update / withdraw after flags were
-	 * set
-	 */
-	if (old_select || new_select) {
-		hook_call(bgp_route_update, bgp, afi, safi, dest, old_select,
-			  new_select);
-	}
-
 
 #ifdef ENABLE_BGP_VNC
 	if ((afi == AFI_IP || afi == AFI_IP6) && (safi == SAFI_UNICAST)) {
