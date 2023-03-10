@@ -457,45 +457,8 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 
 	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d, from=%s", __func__, (int)(subgrp ? subgrp->id : -1), dest, path, addpath_tx, attr, post_policy, withdraw, caller);
 
-	if (post_policy) {
-		hook_call(bgp_adj_out_updated, subgrp, dest, NULL, addpath_tx, attr,
-			  true, withdraw);
-		return;
-	}
-
-	if (!path && withdraw) {
-		zlog_info("%s: looking for bmp held path", __func__);
-		for (path = dest ? bgp_dest_get_bgp_path_info(dest) : NULL; path;
-		     path = path->next) {
-			if (CHECK_FLAG(path->flags, BGP_PATH_BMP_LOCKED) && addpath_tx == bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath)) {
-				break;
-			} else {
-				zlog_info("%s: path bpi=%p tx_id=%d, from=%pBP doesnt match", __func__, path, bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &path->tx_addpath), path->peer);
-			}
-		}
-
-		if (!path) {
-			zlog_info("%s: no held path found", __func__);
-			return;
-		}
-	}
-
-	struct attr dummy_attr = {0};
-	/*
-	 * withdraw 	| pre_check	| result
-	 * true		| true		| withdraw
-	 * true		| false		| nothing to do
-	 * false	| true		| update
-	 * false	| false		| nothing to do
-	 */
-	bool pre_check = subgroup_announce_check(dest, path, subgrp, &dest->p, &dummy_attr,
-				NULL, BGP_ANNCHK_SPECIAL_PREPOLICY);
-
-	if (!pre_check)
-		return;
-
 	hook_call(bgp_adj_out_updated, subgrp, dest, path, addpath_tx, attr,
-		  false, withdraw);
+		  post_policy, withdraw);
 }
 
 void bgp_adj_out_set_subgroup(struct bgp_dest *dest,

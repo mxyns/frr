@@ -135,52 +135,60 @@ struct bmp_peerh_head bmp_peerh;
 static int bmp_bpi_lock_cmp(const struct bmp_bpi_lock *a,
 			    const struct bmp_bpi_lock *b)
 {
-	if (a->locked < b->locked)
-		return -1;
-	if (a->locked > b->locked)
-		return 1;
-	return 0;
+	return prefix_cmp(&a->dest->p, &b->dest->p);
 }
 
 static uint32_t bmp_bpi_lock_hash(const struct bmp_bpi_lock *e)
 {
-	return jhash(&e->locked, sizeof(e->locked), 0x55aa5a5a);
+	// TODO bgp instance specific hashing to reduce collisions
+	return prefix_hash_key(&e->dest->p);
 }
 
-DECLARE_HASH(bmp_lbpi, struct bmp_bpi_lock, lbpi,
+DECLARE_HASH(bmp_lbpi_h, struct bmp_bpi_lock, lbpi_h,
 		bmp_bpi_lock_cmp, bmp_bpi_lock_hash);
 
-struct bmp_lbpi_head bmp_lbpi;
+struct bmp_lbpi_h_head bmp_lbpi;
 
 static struct bmp_bpi_lock *bmp_lock_bpi(struct bgp_path_info *bpi) {
 
 	if (!bpi)
 		return NULL;
 
-	struct bmp_bpi_lock dummy = { .locked = bpi }, *lbpi_ptr;
+	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi);
 
-	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
-	if (!lbpi_ptr) {
-		lbpi_ptr = XCALLOC(MTYPE_BMP_LBPI, sizeof(struct bmp_bpi_lock));
+	if (!hash_lookup) {
+		hash_lookup = XCALLOC(MTYPE_BMP_LBPI, sizeof(struct bmp_bpi_lock));
 		SET_FLAG(bpi->flags, BGP_PATH_BMP_LOCKED);
-		lbpi_ptr->locked = bpi;
-		lbpi_ptr->lock = 0;
-		bgp_path_info_lock(lbpi_ptr->locked);
-		bmp_lbpi_add(&bmp_lbpi, lbpi_ptr);
+		hash_lookup->locked = bpi;
+		hash_lookup->dest = bpi->net;
+		hash_lookup->next = NULL;
+		hash_lookup->lock = 0;
+		bgp_path_info_lock(hash_lookup->locked);
+
+		/* here prev is tail bc hash_lookup == tail->next == NULL */
+		if (!prev)
+			bmp_lbpi_h_add(&bmp_lbpi, hash_lookup);
+		else
+			prev->next = hash_lookup;
+
 	}
 
-	lbpi_ptr->lock++;
+	hash_lookup->lock++;
 
-	return lbpi_ptr;
+	zlog_info("%s: bpi=%p lbpi=%p main=%d, lock=%d", __func__, bpi, hash_lookup, hash_lookup->main, hash_lookup->lock);
+
+	return hash_lookup;
 }
 
 static int bmp_mainlock_bpi(struct bgp_path_info *bpi) {
 
 	if (!bpi)
 		return -1;
+
 	struct bmp_bpi_lock *lbpi = bmp_lock_bpi(bpi);
 	lbpi->main = 1;
-	lbpi->lock--;
+	zlog_info("%s: bpi=%p lbpi=%p main=%d, lock=%d", __func__, bpi, lbpi, lbpi ? lbpi->main : -1, lbpi ? lbpi->lock : -1);
+	// lbpi->lock--; // locking add 1 to lock, neutralize it
 
 
 	return 1;
@@ -191,43 +199,69 @@ static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi) {
 	if (!bpi)
 		return NULL;
 
-	struct bmp_bpi_lock dummy = { .locked = bpi }, *lbpi_ptr;
+	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi);
 
-	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
-
-	if (!lbpi_ptr)
+	// nothing found, bpi is not locked, cannot unlock
+	if (!hash_lookup)
 		return NULL;
 
-	lbpi_ptr->lock--;
+	// unlock once
+	hash_lookup->lock--;
 
-	if (lbpi_ptr->lock-- <= 0 && lbpi_ptr->main == 0) {
-		bgp_path_info_unlock(lbpi_ptr->locked);
-		bmp_lbpi_del(&bmp_lbpi, lbpi_ptr);
+	zlog_info("%s: bpi=%p lbpi=%p main=%d, lock=%d", __func__, bpi, hash_lookup, hash_lookup->main, hash_lookup->lock);
+
+	// bpi is not used by bmp
+	if (hash_lookup->lock <= 0 && hash_lookup->main == 0) {
+
+		struct bgp_path_info *tmp = hash_lookup->locked;
+
+		// swap hash list head
+		if (head == hash_lookup) {
+			bmp_lbpi_h_del(&bmp_lbpi, hash_lookup);
+			if (head->next)
+				bmp_lbpi_h_add(&bmp_lbpi, head->next);
+		}
+
+		// relink list
+		if (prev)
+			prev->next = hash_lookup->next;
+
 		UNSET_FLAG(bpi->flags, BGP_PATH_BMP_LOCKED);
-		XFREE(MTYPE_BMP_LBPI, lbpi_ptr);
+		XFREE(MTYPE_BMP_LBPI, hash_lookup);
+		bgp_path_info_unlock(tmp);
+
 		return NULL;
 	}
 
-	return lbpi_ptr;
+	return hash_lookup;
 }
 
 
 static inline void bmp_bqe_free(struct bmp_queue_entry *bqe) {
 
-	if (!bqe) return;
-	if (bqe->locked_bpi)
+	zlog_info("bqe free %p", bqe);
+	if (!bqe)
+		return;
+
+	if (bqe->locked_bpi) {
+		zlog_info("bqe %p free and unlock %p", bqe, bqe->locked_bpi);
 		bmp_unlock_bpi(bqe->locked_bpi);
+	}
 
 	XFREE(MTYPE_BMP_QUEUE, bqe);
 }
 
 static int bmp_mainunlock_bpi(struct bgp_path_info *bpi) {
 
-	struct bmp_bpi_lock dummy = { .locked = bpi }, *lbpi_ptr;
+	BMP_LBPI_LOOKUP_BPI(head, prev, lock, bpi);
 
-	lbpi_ptr = bmp_lbpi_find(&bmp_lbpi, &dummy);
+	int res = lock ? (lock->main = 0) : -1;
+	zlog_info("%s: bpi=%p lbpi=%p main=%d, lock=%d", __func__, bpi, lock, lock ? lock->main : -1, lock ? lock->lock : -1);
 
-	return lbpi_ptr ? lbpi_ptr->main = 0 : -1;
+	lock = bmp_unlock_bpi(bpi);
+
+	zlog_info("%s: bpi=%p lbpi=%p main=%d, lock=%d", __func__, bpi, lock, lock ? lock->main : -1, lock ? lock->lock : -1);
+	return res;
 }
 
 DECLARE_LIST(bmp_mirrorq, struct bmp_mirrorq, bmi);
@@ -1567,15 +1601,17 @@ bmp_pull_from_queue(struct bmp_qlist_head *list, struct bmp_qhash_head *hash,
 		    struct bmp_queue_entry **queuepos_ptr)
 {
 	struct bmp_queue_entry *bqe;
-
 	bqe = *queuepos_ptr;
+	zlog_info("pulling bqe got %p", bqe);
 	if (!bqe)
 		return NULL;
 
 	*queuepos_ptr = bmp_qlist_next(list, bqe);
+	zlog_info("next is %p", *queuepos_ptr);
 
 	bqe->refcount--;
 	if (!bqe->refcount) {
+		zlog_info("bqe %p consumed by all sessions", bqe);
 		bmp_qhash_del(hash, bqe);
 		bmp_qlist_del(list, bqe);
 	}
@@ -1733,14 +1769,6 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	}
 
 	zlog_info("%s: no early out, locrib=%p, ribin=%p, bqe->flags=%"PRIu8", monflags=%"PRIu8", &flags=%"PRIu8, __func__, locrib, ribin, bqe->flags, bmp->targets->afimon[afi][safi], flags);
-	if (CHECK_FLAG(flags, BMP_MON_LOC_RIB)
-	    && CHECK_FLAG(bqe->flags, BMP_MON_LOC_RIB)
-	    && !locrib) {
-		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
-			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
-			    (time_t)(-1L));
-		written = true;
-	}
 
 	if (CHECK_FLAG(flags, BMP_MON_IN_POSTPOLICY)
 	    && !ribin) {
@@ -1748,6 +1776,14 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    NULL, afi, safi, addpath_rx_id,
 			    (time_t)(-1));
+		written = true;
+	}
+
+	if (CHECK_FLAG(flags, BMP_MON_LOC_RIB)
+	    && !locrib) {
+		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
+			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
+			    (time_t)(-1L));
 		written = true;
 	}
 
@@ -1883,7 +1919,9 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 				    bgp_addpath_id_for_peer(peer, afi, safi,
 							    &bpi->tx_addpath))
 					continue;
-				if (CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED)) {
+
+				if (CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED
+					       | BGP_PATH_MULTIPATH)) {
 					zlog_info("%s: path selected", __func__);
 					break;
 				} else {
@@ -2024,6 +2062,7 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 
 	bqe = bmp_qhash_find(updhash, &bqeref);
 	if (bqe) {
+		zlog_info("%s: found bqe %p", __func__, bqe);
 		SET_FLAG(bqe->flags, mon_flag);
 		/* swap locked bpis and un/lock pre/new bpis */
 		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
@@ -2032,10 +2071,12 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 			bqe->locked_bpi = lock_bpi;
 		}
 
-		if (bqe->refcount >= refcount)
+		if (bqe->refcount >= refcount) {
+			zlog_info("%s: /* same update, not sent to anyone yet nothing to do here */", __func__);
 			/* same update, not sent to anyone yet,
 			 * nothing to do here */
 			return NULL;
+		}
 
 		bmp_qlist_del(updlist, bqe);
 	} else {
@@ -2043,12 +2084,14 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		memcpy(bqe, &bqeref, sizeof(*bqe));
 
 		bmp_qhash_add(updhash, bqe);
+		zlog_info("%s: alloc new bqe", __func__);
 
 		if (lock_bpi)
 			bmp_lock_bpi(lock_bpi);
 	}
 
 	bqe->refcount = refcount;
+	zlog_info("%s: add tail %p", __func__, bqe);
 	bmp_qlist_add_tail(updlist, bqe);
 
 	return bqe;
@@ -2095,18 +2138,18 @@ static int bmp_process_ribinpre(struct bgp *bgp, afi_t afi, safi_t safi,
 		if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_IN_PREPOLICY))
 			continue;
 
-		struct bmp_queue_entry *last_item = bmp_process_one(
+		struct bmp_queue_entry *new_item = bmp_process_one(
 			bt, &bt->mon_in_updhash, &bt->mon_in_updlist, bgp, afi,
 			safi, bn, addpath_id, peer, BMP_MON_IN_PREPOLICY, NULL);
 
 		// if bmp_process_one returns NULL
 		// we don't have anything to do next
-		if (!last_item)
+		if (!new_item)
 			continue;
 
 		frr_each(bmp_session, &bt->sessions, bmp) {
 			if (!bmp->mon_in_queuepos)
-				bmp->mon_in_queuepos = last_item;
+				bmp->mon_in_queuepos = new_item;
 
 			pullwr_bump(bmp->pullwr);
 		}
@@ -2139,19 +2182,24 @@ static int bmp_process_ribinpost(struct bgp *bgp, afi_t afi, safi_t safi,
 	if (!bmpbgp)
 		return 0;
 
-	struct bmp_queue_entry *last_item;
 
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
 		if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_IN_POSTPOLICY))
 			continue;
 
+		struct bmp_queue_entry *new_head = NULL, *new_item = NULL;
+
 		for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(bn); bpi; bpi = bpi->next) {
+			zlog_info("%s: bpi %p of peer %pBP rx %"PRIu32, __func__, bpi, bpi->peer, bpi->addpath_rx_id);
 			if (CHECK_FLAG(bpi->flags, BGP_PATH_BMP_ADJ_CHG)) {
-				last_item = bmp_process_one(
+				zlog_info("%s: has BGP_PATH_BMP_ADJ_CHG flag", __func__);
+				new_item = bmp_process_one(
 					bt, &bt->mon_loc_updhash,
 					&bt->mon_loc_updlist, bgp, afi, safi, bn,
 					bpi->addpath_rx_id, bpi->peer,
 					BMP_MON_IN_POSTPOLICY, NULL);
+
+				new_head = !new_head ? new_item : new_head;
 
 				UNSET_FLAG(bpi->flags, BGP_PATH_BMP_ADJ_CHG);
 			}
@@ -2159,16 +2207,17 @@ static int bmp_process_ribinpost(struct bgp *bgp, afi_t afi, safi_t safi,
 
 		// if bmp_process_one returns NULL
 		// we don't have anything to do next
-		if (!last_item)
+		if (!new_head)
 			continue;
 
 		frr_each(bmp_session, &bt->sessions, bmp) {
 			if (!bmp->mon_loc_queuepos)
-				bmp->mon_loc_queuepos = last_item;
+				bmp->mon_loc_queuepos = new_head;
 
 			pullwr_bump(bmp->pullwr);
 		}
 	}
+
 	return 0;
 }
 
@@ -3149,19 +3198,43 @@ DEFPY(bmp_show_locked_cfg, bmp_show_locked_cmd,
       "show cmd to debug locked bpi still in hash table\n"
 )
 {
+	VTY_DECLVAR_CONTEXT_SUB(bmp_targets, bt);
+
 	struct bmp_bpi_lock* lbpi;
-	frr_each(bmp_lbpi, &bmp_lbpi, lbpi) {
+	frr_each(bmp_lbpi_h, &bmp_lbpi, lbpi) {
 		if (!lbpi) {
 			zlog_info("no bucket");
 			continue;
 		}
-		if (!lbpi->locked) {
-			zlog_info("empty bucket");
-			continue;
-		}
-		zlog_info("bucket: contains %pRN", lbpi->locked->net);
-		vty_out(vty, "bucket: contains %pRN", lbpi->locked->net);
+		int i = 0;
+		do {
+			if (!lbpi->locked) {
+				zlog_info("empty bucket");
+				continue;
+			}
+			zlog_info("bucket: %s %d contains %pRN rx %"PRIu32" from %pBP", i == 0 ? "head" : "node", i, lbpi->locked->net, lbpi->locked->addpath_rx_id, lbpi->locked->peer);
+			vty_out(vty, "bucket: %s %d contains %pRN rx %"PRIu32" from %pBP", i == 0 ? "head" : "node", i, lbpi->locked->net, lbpi->locked->addpath_rx_id, lbpi->locked->peer);
+			zlog_info("	main=%d, lock=%d", lbpi->main, lbpi->lock);
+			i++;
+		} while (lbpi && (lbpi = lbpi->next) && lbpi);
 	}
+
+	vty_out(vty, "bmp_lbpi_head is %p\n", &bmp_lbpi);
+	afi_t afi; safi_t safi;
+	FOREACH_AFI_SAFI(afi, safi) {
+		struct bgp_table *rib = bt->bgp->rib[afi][safi];
+		vty_out(vty, "printing rib %s %p of bgp id %"PRIu32"\n", get_afi_safi_str(afi, safi, false), rib,
+			bt->bgp->vrf_id);
+		for (struct bgp_dest *bn = bgp_table_top(rib); bn; bn = bgp_route_next(bn)) {
+			vty_out(vty, "  %p bgp dest %pRN hash %"PRIu32"\n", bn, bn, bmp_bpi_lock_hash(&(struct bmp_bpi_lock){
+											 .dest = bn,
+										 }));
+			for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(bn); bpi; bpi = bpi->next) {
+				vty_out(vty, "    %p bpi from %pBP rx %"PRIu32"\n", bpi, bpi->peer, bpi->addpath_rx_id);
+			}
+		}
+	}
+
 
 	return CMD_SUCCESS;
 }
@@ -3603,8 +3676,8 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
-	if (old_route) zlog_info("%s: bn %pRN old (rx %"PRIu32")", __func__, bn, old_route->addpath_rx_id);
-	if (new_route) zlog_info("%s: bn %pRN new (rx %"PRIu32")", __func__,  bn, new_route->addpath_rx_id);
+	if (old_route) zlog_info("%s: bn %pRN old (rx %"PRIu32") from %pBP", __func__, bn, old_route->addpath_rx_id, old_route->peer);
+	if (new_route) zlog_info("%s: bn %pRN new (rx %"PRIu32") from %pBP", __func__,  bn, new_route->addpath_rx_id, new_route->peer);
 	/* lock the bpi in case of withdraw for rib-out pre-policy
 	 * do this unconditionally because adj_out_changed hook will always be
 	 * called whether rib-out mon is configured or not and this avoids problems
@@ -3645,19 +3718,21 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 
 		zlog_info("queueing bqe for %pRN %"PRIu32, bn, updated_route->addpath_rx_id);
 
-		struct bmp_queue_entry *last_item = bmp_process_one(
+		struct bmp_queue_entry *new_item = bmp_process_one(
 			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
 			afi, safi, bn, updated_route->addpath_rx_id,
 			peer, BMP_MON_LOC_RIB, NULL);
 
 		// if bmp_process_one returns NULL
 		// we don't have anything to do next
-		if (!last_item)
+		if (!new_item) {
+			zlog_info("no need to bump");
 			continue;
+		}
 
 		frr_each (bmp_session, &bt->sessions, bmp) {
 			if (!bmp->mon_loc_queuepos)
-				bmp->mon_loc_queuepos = last_item;
+				bmp->mon_loc_queuepos = new_item;
 
 			pullwr_bump(bmp->pullwr);
 		};
@@ -3677,11 +3752,46 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 			       uint32_t addpath_id, struct attr *attr,
 			       bool post_policy, bool withdraw) {
 
-	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d", __func__, (int)(subgrp ? subgrp->id : -1), dest, locked_path, addpath_id, attr, post_policy, withdraw);
+	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d", __func__, (subgrp ? (int)subgrp->id : -1), dest, locked_path, addpath_id, attr, post_policy, withdraw);
 
 	if (!subgrp) {
-		zlog_debug("%s: no subgrp, bmp rib-out post will not proceed", __func__);
-		goto out;
+		return 0;
+	}
+
+	if (!post_policy) {
+
+		if (withdraw && !locked_path) {
+			{ /* scope lock the vars declared by lookup */
+				BMP_LBPI_LOOKUP_DEST(head, prev, lbpi, dest,
+						     bgp_addpath_id_for_peer(SUBGRP_PEER(subgrp), SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp), &lbpi->locked->tx_addpath) == addpath_id
+						     );
+
+				if (!lbpi) {
+					zlog_info(
+						"no locked path found for %pRN tx %" PRIu32,
+						dest, addpath_id);
+					return 0;
+				}
+
+				locked_path = lbpi->locked;
+			}
+		}
+
+		struct attr dummy_attr = {0};
+		/*
+		 * withdraw 	| pre_check	| result
+		 * true		| true		| withdraw
+		 * true		| false		| nothing to do
+		 * false	| true		| update
+		 * false	| false		| nothing to do
+		 */
+
+		bool pre_check = subgroup_announce_check(
+			dest, locked_path, subgrp, &dest->p, &dummy_attr, NULL,
+			BGP_ANNCHK_SPECIAL_PREPOLICY);
+
+		if (!pre_check)
+			return 0; // do not goto out
 	}
 
 	struct bmp_targets *bt;
@@ -3694,7 +3804,6 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 		post_policy ?
 			    BMP_MON_OUT_POSTPOLICY
 			    : BMP_MON_OUT_PREPOLICY;
-
 
 	if (post_policy || !withdraw)
 		locked_path = NULL;
@@ -3710,19 +3819,19 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 			peer = PAF_PEER(paf);
 
 			zlog_info("%s: adding bqe for peer=%pBP in subgrp=%"PRIu64", monflag=%d, dest=%pRN, tx_id=%"PRIu32, __func__, peer, subgrp->id, mon_flag, dest, addpath_id);
-			struct bmp_queue_entry *last_item = bmp_process_one(
+			struct bmp_queue_entry *new_item = bmp_process_one(
 				bt, &bt->mon_out_updhash, &bt->mon_out_updlist,
 				NULL, afi, safi, dest, addpath_id, peer, mon_flag,
 				locked_path);
 
 			// if bmp_process_one returns NULL
 			// we don't have anything to do next
-			if (!last_item)
+			if (!new_item)
 				continue;
 
 			frr_each (bmp_session, &bt->sessions, bmp) {
 				if (!bmp->mon_out_queuepos)
-					bmp->mon_out_queuepos = last_item;
+					bmp->mon_out_queuepos = new_item;
 
 				// TODO avoid bumping for each update ?
 				pullwr_bump(bmp->pullwr);
@@ -3730,10 +3839,11 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 		}
 	};
 
-out:
-	if (locked_path) // path is not allowed to be NULL for rib-out-pre withdraws only
-		bmp_mainunlock_bpi(locked_path);
 	return 0;
+}
+
+static int bmp_path_unlock(struct bgp_path_info *path) {
+	return bmp_mainunlock_bpi(path);
 }
 
 static int bgp_bmp_module_init(void)
@@ -3749,6 +3859,7 @@ static int bgp_bmp_module_init(void)
 	hook_register(bgp_process_main_one, bmp_process_ribinpost);
 	hook_register(bgp_route_update, bmp_route_update);
 	hook_register(bgp_adj_out_updated, bmp_adj_out_changed);
+	hook_register(bgp_process_main_one_end, bmp_path_unlock);
 	return 0;
 }
 

@@ -507,20 +507,22 @@ static void bgp_path_info_mpath_attr_set(struct bgp_path_info *path,
 void bgp_mpath_diff_insert(struct bgp_mpath_diff_head *diff,
 				  struct bgp_path_info *bpi, bool update)
 {
-	zlog_info("%s: diff ref is %p", __func__, diff);
-	zlog_info("%s: adding %p to %s, cnt=%d", __func__, bpi, update ? "update" : "withdraw", (int)bgp_mpath_diff_count(diff));
 	struct bgp_path_info_mpath_diff *item = XCALLOC(MTYPE_BGP_MPATH_DIFF, sizeof(struct bgp_path_info_mpath_diff));
 	item->path = bpi;
 	item->update = update;
+
+	bgp_path_info_lock(bpi);
 	bgp_mpath_diff_add_tail(diff, item);
-	zlog_info("%s: added %p to %s, cnt=%d", __func__, bpi, update ? "update" : "withdraw", (int)bgp_mpath_diff_count(diff));
 }
 
 void bgp_mpath_diff_clear(struct bgp_mpath_diff_head *diff) {
 	struct bgp_path_info_mpath_diff *mp_diff;
 
-	while((mp_diff = bgp_mpath_diff_pop(diff)))
+	while((mp_diff = bgp_mpath_diff_pop(diff))) {
+		if (mp_diff->path)
+			bgp_path_info_unlock(mp_diff->path);
 		XFREE(MTYPE_BGP_MPATH_DIFF, mp_diff);
+	}
 }
 
 /*
