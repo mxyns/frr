@@ -90,6 +90,8 @@ DEFINE_HOOK(bgp_route_update,
 	     struct bgp_path_info *old_route, struct bgp_path_info *new_route),
 	    (bgp, afi, safi, bn, old_route, new_route));
 
+DEFINE_HOOK(bgp_process_main_one_end, (struct bgp_path_info * path), (path));
+
 /* Extern from bgp_dump.c */
 extern const char *bgp_origin_str[];
 extern const char *bgp_origin_long_str[];
@@ -3258,14 +3260,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	struct bgp_mpath_diff_head mpath_diff;
 	bgp_mpath_diff_init(&mpath_diff);
 
-	// zlog_info("%s: all bpi info", __func__);
-	// for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(dest);
-	// bpi; bpi=bpi->next) { 	zlog_info("%s: bpi %p from %pBP rx_id=%"PRIu32,
-	// __func__, bpi, bpi->peer, bpi->addpath_rx_id);
-	// 	bgp_show_path_flags(bpi);
-	// 	bgp_show_mpath_info(bpi);
-	// }
-
 	/* Best path selection. */
 	bgp_best_selection(bgp, dest, &bgp->maxpaths[afi][safi], &old_and_new,
 			   afi, safi, &mpath_diff);
@@ -3326,6 +3320,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 
 
 	struct bgp_path_info_mpath_diff *diff;
+
 	/* call bmp hook for loc-rib route update / withdraw after flags were
 	 * set
 	 */
@@ -3364,12 +3359,9 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 				diff->path->addpath_rx_id);
 
 			hook_call(bgp_route_update, bgp, afi, safi, dest,
-				  old_select, diff->path);
+				  diff->path, diff->update ? diff->path : NULL);
 		}
 	}
-
-	bgp_mpath_diff_clear(&mpath_diff);
-	bgp_mpath_diff_fini(&mpath_diff);
 
 	/* If best route remains the same and this is not due to user-initiated
 	 * clear, see exactly what needs to be done.
@@ -3426,7 +3418,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
 
 		zlog_info("BGP DP EARLY OUT");
-		return;
+		goto out;
 	}
 
 	/* If the user did "clear ip bgp prefix x.x.x.x" this flag will be set
@@ -3532,6 +3524,23 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		bgp_path_info_reap(dest, old_select);
 
 	UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
+
+out:
+	// TODO HERE CALL BMP MAIN UNLOCK FOR THE LOCKED BPIs
+	// CAN PROBABLY REMOVE THE MAIN LOCK THINGY TOO
+
+	if (old_select || new_select)
+		hook_call(bgp_process_main_one_end,
+			  old_select && !new_select ? old_select : new_select);
+
+	frr_each (bgp_mpath_diff, &mpath_diff, diff) {
+		if (!diff->path)
+			continue;
+
+		hook_call(bgp_process_main_one_end, diff->path);
+	}
+	bgp_mpath_diff_clear(&mpath_diff);
+	bgp_mpath_diff_fini(&mpath_diff);
 	return;
 }
 
