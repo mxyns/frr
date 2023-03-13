@@ -3672,7 +3672,6 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bgp_path_info *updated_route =
 		is_withdraw ? old_route : new_route;
 	struct bmp_bgp *bmpbgp = bmp_bgp_get(bgp);
-	struct peer *peer = updated_route->peer;
 	struct bmp_targets *bt;
 	struct bmp *bmp;
 
@@ -3711,28 +3710,41 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 		bgp_path_info_extra_get(new_route)->bgp_rib_uptime =
 			monotime(NULL);
 
+
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
 		if (!CHECK_FLAG(bt->afimon[afi][safi],
 			       BMP_MON_LOC_RIB))
 			continue;
 
+		struct bmp_queue_entry *new_head = NULL;
 		zlog_info("queueing bqe for %pRN %"PRIu32, bn, updated_route->addpath_rx_id);
+
+		// send withdraw for previously selected best-path in case of
+		// best path change. can be removed when
+		// draft-cppy-grow-bmp-path-marking-tlv-11 is added
+		if (old_route && new_route && old_route != new_route) {
+			new_head = bmp_process_one(
+				bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
+				afi, safi, bn, old_route->addpath_rx_id,
+				old_route->peer, BMP_MON_LOC_RIB, NULL);
+		}
 
 		struct bmp_queue_entry *new_item = bmp_process_one(
 			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
 			afi, safi, bn, updated_route->addpath_rx_id,
-			peer, BMP_MON_LOC_RIB, NULL);
+			updated_route->peer, BMP_MON_LOC_RIB, NULL);
+		new_head = !new_head ? new_item : new_head;
 
 		// if bmp_process_one returns NULL
 		// we don't have anything to do next
-		if (!new_item) {
+		if (!new_head) {
 			zlog_info("no need to bump");
 			continue;
 		}
 
 		frr_each (bmp_session, &bt->sessions, bmp) {
 			if (!bmp->mon_loc_queuepos)
-				bmp->mon_loc_queuepos = new_item;
+				bmp->mon_loc_queuepos = new_head;
 
 			pullwr_bump(bmp->pullwr);
 		};
