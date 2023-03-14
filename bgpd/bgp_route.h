@@ -303,7 +303,7 @@ struct bgp_path_info {
 #define BGP_PATH_LINK_BW_CHG (1 << 15)
 #define BGP_PATH_ACCEPT_OWN (1 << 16)
 #define BGP_PATH_BMP_LOCKED (1 << 17)
-#define BGP_PATH_BMP_ADJ_CHG (1 << 18)
+#define BGP_PATH_BMP_ADJIN_CHG (1 << 18)
 
 	/* BGP route type.  This can be static, RIP, OSPF, BGP etc.  */
 	uint8_t type;
