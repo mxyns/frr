@@ -505,13 +505,17 @@ static void bgp_path_info_mpath_attr_set(struct bgp_path_info *path,
 }
 
 void bgp_mpath_diff_insert(struct bgp_mpath_diff_head *diff,
-				  struct bgp_path_info *bpi, bool update)
+			   struct bgp_path_info *bpi, bool update)
 {
+	if (!bpi)
+		zlog_warn("%s: path info given is null", __func__);
+
 	struct bgp_path_info_mpath_diff *item = XCALLOC(MTYPE_BGP_MPATH_DIFF, sizeof(struct bgp_path_info_mpath_diff));
 	item->path = bpi;
 	item->update = update;
 
 	bgp_path_info_lock(bpi);
+	bgp_dest_lock_node(bpi->net);
 	bgp_mpath_diff_add_tail(diff, item);
 }
 
@@ -519,6 +523,8 @@ void bgp_mpath_diff_clear(struct bgp_mpath_diff_head *diff) {
 	struct bgp_path_info_mpath_diff *mp_diff;
 
 	while((mp_diff = bgp_mpath_diff_pop(diff))) {
+		if (mp_diff->path && mp_diff->path->net)
+			bgp_dest_unlock_node(mp_diff->path->net);
 		if (mp_diff->path)
 			bgp_path_info_unlock(mp_diff->path);
 		XFREE(MTYPE_BGP_MPATH_DIFF, mp_diff);

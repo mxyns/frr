@@ -661,8 +661,8 @@ DECLARE_HOOK(bgp_route_update,
 
 
 DECLARE_HOOK(bgp_process_main_one_end,
-	    (struct bgp_path_info *path),
-	    (path));
+	    (struct bgp *bgp, struct bgp_path_info *path),
+	    (bgp, path));
 
 /* BGP show options */
 #define BGP_SHOW_OPT_JSON (1 << 0)

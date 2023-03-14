@@ -91,8 +91,8 @@ DEFINE_HOOK(bgp_route_update,
 	    (bgp, afi, safi, bn, old_route, new_route));
 
 DEFINE_HOOK(bgp_process_main_one_end,
-	     (struct bgp_path_info *path),
-	     (path));
+	     (struct bgp *bgp, struct bgp_path_info *path),
+	     (bgp, path));
 
 /* Extern from bgp_dump.c */
 extern const char *bgp_origin_str[];
@@ -3405,13 +3405,13 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 
 out:
 	if (old_select || new_select)
-		hook_call(bgp_process_main_one_end, old_select && !new_select ? old_select : new_select);
+		hook_call(bgp_process_main_one_end, bgp, old_select && !new_select ? old_select : new_select);
 
 	frr_each (bgp_mpath_diff, &mpath_diff, diff) {
 		if (!diff->path)
 			continue;
 
-		hook_call(bgp_process_main_one_end, diff->path);
+		hook_call(bgp_process_main_one_end, bgp, diff->path);
 	}
 	bgp_mpath_diff_clear(&mpath_diff);
 	bgp_mpath_diff_fini(&mpath_diff);

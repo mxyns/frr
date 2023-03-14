@@ -289,42 +289,44 @@ struct bmp_bpi_lock {
 	struct bmp_lbpi_h_item lbpi_h;
 	struct bmp_bpi_lock *next;
 
+	/* bgp instance associated with bpi and dest
+	 * needed for differentiation between vrfs/views
+	 */
+	struct bgp *bgp;
 	/* locked bgp_path_info */
 	struct bgp_path_info *locked;
+	/* dest of locked bgp_path_info for lookup */
 	struct bgp_dest *dest;
 
-	/* main lock used to lock between loc-rib trigger (the one who locks)
-	 * and bgp_adj_out_updated (the one who unlocks)
-	 */
-	int main;
-
-	/* secondary lock, one for each bqe in the rib-out queue
+	/* lock, one for each bqe in the rib-out queue
 	 * when each bqe is allocated we increment this lock
 	 * when freed we decrement it
-	 * after all bqe are processed, main should be 0 and lock 0 too
+	 * after all bqe are processed, it should be 0
 	 * so the bpi can be unlocked (and maybe freed)
 	 */
 	int lock;
 };
 
 
-#define BMP_LBPI_LOOKUP_DEST(head, prev, lookup, target_dest, condition) 		\
-	struct bmp_bpi_lock __dummy = {							\
-		.dest = (target_dest),							\
+#define BMP_LBPI_LOOKUP_DEST(head, prev, lookup, target_dest, 				\
+			     target_bgp, condition) 					\
+	struct bmp_bpi_lock _dummy_lbpi = {						\
+		.dest = (target_dest),                                          	\
+		.bgp = (target_bgp),							\
 	};										\
                                                           				\
         struct bmp_bpi_lock *(head) = NULL, *(prev) = NULL, *(lookup) = NULL;		\
                                                                          		\
-	(head) = bmp_lbpi_h_find(&bmp_lbpi, &__dummy);					\
+	(head) = bmp_lbpi_h_find(&bmp_lbpi, &_dummy_lbpi);				\
                                                                          		\
 	for ((lookup) = (head); (lookup); (lookup) = ((prev) = (lookup))->next) {	\
         	if ((condition)) 							\
         		break;                                                 		\
 	}
 
-#define BMP_LBPI_LOOKUP_BPI(head, prev, lookup, target_bpi) 			\
-	BMP_LBPI_LOOKUP_DEST((head), (prev), (lookup), (target_bpi)->net, 	\
-			     ((lookup)->locked == (target_bpi)))
+#define BMP_LBPI_LOOKUP_BPI(head, prev, lookup, target_bpi, target_bgp)		\
+	BMP_LBPI_LOOKUP_DEST((head), (prev), (lookup), (target_bpi)->net,       \
+			     (target_bgp), ((lookup)->locked == (target_bpi)))
 /* per struct bgp * data */
 PREDECL_HASH(bmp_bgph);
 
