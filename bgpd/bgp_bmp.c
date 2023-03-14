@@ -3315,13 +3315,8 @@ DEFPY(bmp_startup_delay_cfg,
 }
 
 
+static void bmp_show_bmp(struct vty *vty) {
 
-DEFPY(show_bmp,
-      show_bmp_cmd,
-      "show bmp",
-      SHOW_STR
-      BMP_STR)
-{
 	struct bmp_bgp *bmpbgp;
 	struct bmp_targets *bt;
 	struct bmp_listener *bl;
@@ -3334,15 +3329,15 @@ DEFPY(show_bmp,
 	vty_out(vty, "BMP Module started at %pTVM\n\n", &bmp_startup_time);
 	frr_each(bmp_bgph, &bmp_bgph, bmpbgp) {
 		vty_out(vty, "BMP state for BGP %s:\n\n",
-				bmpbgp->bgp->name_pretty);
+			bmpbgp->bgp->name_pretty);
 		vty_out(vty, "  Route Mirroring %9zu bytes (%zu messages) pending\n",
-				bmpbgp->mirror_qsize,
-				bmp_mirrorq_count(&bmpbgp->mirrorq));
+			bmpbgp->mirror_qsize,
+			bmp_mirrorq_count(&bmpbgp->mirrorq));
 		vty_out(vty, "                  %9zu bytes maximum buffer used\n",
-				bmpbgp->mirror_qsizemax);
+			bmpbgp->mirror_qsizemax);
 		if (bmpbgp->mirror_qsizelimit != ~0UL)
 			vty_out(vty, "                  %9zu bytes buffer size limit\n",
-					bmpbgp->mirror_qsizelimit);
+				bmpbgp->mirror_qsizelimit);
 		vty_out(vty, "\n");
 
 		vty_out(vty, "  Startup delay : %s",
@@ -3437,7 +3432,6 @@ DEFPY(show_bmp,
 					       state_str,
 					       ba->last_err ? ba->last_err : "",
 					       uptime, &ba->addrsrc);
-				continue;
 			}
 			out = ttable_dump(tt, "\n");
 			vty_out(vty, "%s", out);
@@ -3474,6 +3468,44 @@ DEFPY(show_bmp,
 			vty_out(vty, "\n");
 		}
 	}
+
+}
+
+static void bmp_show_locked(struct vty *vty) {
+
+	vty_out(vty, "BMP: BGP Paths locked for use in the Monitoring\n");
+	struct bmp_bpi_lock* lbpi;
+	frr_each(bmp_lbpi_h, &bmp_lbpi, lbpi) {
+		if (!lbpi)
+			continue;
+
+		vty_out(vty, "Bucket:\n");
+
+		int n = 0;
+		do {
+			if (!lbpi->locked) {
+				zlog_info(" [%d] Empty node\n", n);
+				continue;
+			}
+
+			vty_out(vty, " [#%d][lock=%d] %s: bgp id=%"PRIu32" dest=%pRN rx_id=%"PRIu32" from peer=%pBP\n",
+				n, lbpi->lock, n == 0 ? "head" : "node", lbpi->bgp->vrf_id, lbpi->locked->net, lbpi->locked->addpath_rx_id, lbpi->locked->peer);
+			n++;
+		} while (lbpi && (lbpi = lbpi->next) && lbpi);
+	}
+}
+
+DEFPY(show_bmp,
+      show_bmp_cmd,
+      "show bmp [locked]$locked",
+      SHOW_STR
+      BMP_STR
+      "Display information specific to paths locked by BMP\n")
+{
+	if (locked)
+		bmp_show_locked(vty);
+	else
+		bmp_show_bmp(vty);
 
 	return CMD_SUCCESS;
 }
