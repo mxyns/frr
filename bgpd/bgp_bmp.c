@@ -142,8 +142,10 @@ static int bmp_bpi_lock_cmp(const struct bmp_bpi_lock *a,
 
 static uint32_t bmp_bpi_lock_hash(const struct bmp_bpi_lock *e)
 {
-	// TODO bgp instance specific hashing to reduce collisions
-	return prefix_hash_key(&e->dest->p);
+	uint32_t key = prefix_hash_key(&e->dest->p);
+	key = jhash(e->bgp, sizeof(*e->bgp), key);
+
+	return key;
 }
 
 DECLARE_HASH(bmp_lbpi_h, struct bmp_bpi_lock, lbpi_h, bmp_bpi_lock_cmp,
@@ -151,23 +153,26 @@ DECLARE_HASH(bmp_lbpi_h, struct bmp_bpi_lock, lbpi_h, bmp_bpi_lock_cmp,
 
 struct bmp_lbpi_h_head bmp_lbpi;
 
-static struct bmp_bpi_lock *bmp_lock_bpi(struct bgp_path_info *bpi)
+static struct bmp_bpi_lock *bmp_lock_bpi(struct bgp *bgp,
+					 struct bgp_path_info *bpi)
 {
-
 	if (!bpi)
 		return NULL;
 
-	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi);
+	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi, bgp);
 
 	if (!hash_lookup) {
 		hash_lookup =
 			XCALLOC(MTYPE_BMP_LBPI, sizeof(struct bmp_bpi_lock));
 		SET_FLAG(bpi->flags, BGP_PATH_BMP_LOCKED);
+		hash_lookup->bgp = bgp;
 		hash_lookup->locked = bpi;
 		hash_lookup->dest = bpi->net;
 		hash_lookup->next = NULL;
 		hash_lookup->lock = 0;
+		bgp_lock(hash_lookup->bgp);
 		bgp_path_info_lock(hash_lookup->locked);
+		bgp_dest_lock_node(hash_lookup->dest);
 
 		/* here prev is tail bc hash_lookup == tail->next == NULL */
 		if (!prev)
@@ -181,25 +186,14 @@ static struct bmp_bpi_lock *bmp_lock_bpi(struct bgp_path_info *bpi)
 	return hash_lookup;
 }
 
-static int bmp_mainlock_bpi(struct bgp_path_info *bpi)
-{
-
-	if (!bpi)
-		return -1;
-
-	struct bmp_bpi_lock *lbpi = bmp_lock_bpi(bpi);
-	lbpi->main = 1;
-
-	return 1;
-}
-
-static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi)
+static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp *bgp,
+					   struct bgp_path_info *bpi)
 {
 
 	if (!bpi)
 		return NULL;
 
-	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi);
+	BMP_LBPI_LOOKUP_BPI(head, prev, hash_lookup, bpi, bgp);
 
 	// nothing found, bpi is not locked, cannot unlock
 	if (!hash_lookup)
@@ -209,9 +203,11 @@ static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi)
 	hash_lookup->lock--;
 
 	// bpi is not used by bmp
-	if (hash_lookup->lock <= 0 && hash_lookup->main == 0) {
+	if (hash_lookup->lock <= 0) {
 
-		struct bgp_path_info *tmp = hash_lookup->locked;
+		struct bgp_path_info *tmp_bpi = hash_lookup->locked;
+		struct bgp_dest *tmp_dest = hash_lookup->dest;
+		struct bgp *tmp_bgp = hash_lookup->bgp;
 
 		// swap hash list head
 		if (head == hash_lookup) {
@@ -226,7 +222,9 @@ static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi)
 
 		UNSET_FLAG(bpi->flags, BGP_PATH_BMP_LOCKED);
 		XFREE(MTYPE_BMP_LBPI, hash_lookup);
-		bgp_path_info_unlock(tmp);
+		bgp_unlock(tmp_bgp);
+		bgp_dest_unlock_node(tmp_dest);
+		bgp_path_info_unlock(tmp_bpi);
 
 		return NULL;
 	}
@@ -235,28 +233,16 @@ static struct bmp_bpi_lock *bmp_unlock_bpi(struct bgp_path_info *bpi)
 }
 
 
-static inline void bmp_bqe_free(struct bmp_queue_entry *bqe)
+static inline void bmp_bqe_free(struct bmp_queue_entry *bqe, struct bgp *bgp)
 {
 
 	if (!bqe)
 		return;
 
 	if (bqe->locked_bpi)
-		bmp_unlock_bpi(bqe->locked_bpi);
+		bmp_unlock_bpi(bgp, bqe->locked_bpi);
 
 	XFREE(MTYPE_BMP_QUEUE, bqe);
-}
-
-static int bmp_mainunlock_bpi(struct bgp_path_info *bpi)
-{
-
-	BMP_LBPI_LOOKUP_BPI(head, prev, lock, bpi);
-
-	int res = lock ? (lock->main = 0) : -1;
-
-	lock = bmp_unlock_bpi(bpi);
-
-	return res;
 }
 
 DECLARE_LIST(bmp_mirrorq, struct bmp_mirrorq, bmi);
@@ -1818,7 +1804,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 
 out:
 	if (!bqe->refcount)
-		bmp_bqe_free(bqe);
+		bmp_bqe_free(bqe, bmp->targets->bgp);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -1885,7 +1871,7 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 
 out:
 	if (!bqe->refcount)
-		bmp_bqe_free(bqe);
+		bmp_bqe_free(bqe, bmp->targets->bgp);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -1987,7 +1973,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 out:
 	if (!bqe->refcount)
-		bmp_bqe_free(bqe);
+		bmp_bqe_free(bqe, bmp->targets->bgp);
 
 	if (bn)
 		bgp_dest_unlock_node(bn);
@@ -2091,8 +2077,8 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		SET_FLAG(bqe->flags, mon_flag);
 		/* swap locked bpis and un/lock pre/new bpis */
 		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
-			bmp_lock_bpi(lock_bpi);
-			bmp_unlock_bpi(bqe->locked_bpi);
+			bmp_lock_bpi(bt->bgp, lock_bpi);
+			bmp_unlock_bpi(bt->bgp, bqe->locked_bpi);
 			bqe->locked_bpi = lock_bpi;
 		}
 
@@ -2110,7 +2096,7 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		bmp_qhash_add(updhash, bqe);
 
 		if (lock_bpi)
-			bmp_lock_bpi(lock_bpi);
+			bmp_lock_bpi(bt->bgp, lock_bpi);
 	}
 
 	bqe->refcount = refcount;
@@ -2510,13 +2496,13 @@ static void bmp_close(struct bmp *bmp)
 			XFREE(MTYPE_BMP_MIRRORQ, bmq);
 	while ((bqe = bmp_pull_ribin(bmp)))
 		if (!bqe->refcount)
-			bmp_bqe_free(bqe);
+			bmp_bqe_free(bqe, bmp->targets->bgp);
 	while ((bqe = bmp_pull_locrib(bmp)))
 		if (!bqe->refcount)
-			bmp_bqe_free(bqe);
+			bmp_bqe_free(bqe, bmp->targets->bgp);
 	while ((bqe = bmp_pull_ribout(bmp)))
 		if (!bqe->refcount)
-			bmp_bqe_free(bqe);
+			bmp_bqe_free(bqe, bmp->targets->bgp);
 
 	EVENT_OFF(bmp->t_read);
 	pullwr_del(bmp->pullwr);
@@ -3349,11 +3335,7 @@ DEFPY(bmp_startup_delay_cfg, bmp_startup_delay_cmd,
 }
 
 
-DEFPY(show_bmp,
-      show_bmp_cmd,
-      "show bmp",
-      SHOW_STR
-      BMP_STR)
+static void bmp_show_bmp(struct vty *vty)
 {
 	struct bmp_bgp *bmpbgp;
 	struct bmp_targets *bt;
@@ -3367,15 +3349,18 @@ DEFPY(show_bmp,
 	vty_out(vty, "BMP Module started at %pTVM\n\n", &bmp_startup_time);
 	frr_each(bmp_bgph, &bmp_bgph, bmpbgp) {
 		vty_out(vty, "BMP state for BGP %s:\n\n",
-				bmpbgp->bgp->name_pretty);
-		vty_out(vty, "  Route Mirroring %9zu bytes (%zu messages) pending\n",
-				bmpbgp->mirror_qsize,
-				bmp_mirrorq_count(&bmpbgp->mirrorq));
-		vty_out(vty, "                  %9zu bytes maximum buffer used\n",
-				bmpbgp->mirror_qsizemax);
+			bmpbgp->bgp->name_pretty);
+		vty_out(vty,
+			"  Route Mirroring %9zu bytes (%zu messages) pending\n",
+			bmpbgp->mirror_qsize,
+			bmp_mirrorq_count(&bmpbgp->mirrorq));
+		vty_out(vty,
+			"                  %9zu bytes maximum buffer used\n",
+			bmpbgp->mirror_qsizemax);
 		if (bmpbgp->mirror_qsizelimit != ~0UL)
-			vty_out(vty, "                  %9zu bytes buffer size limit\n",
-					bmpbgp->mirror_qsizelimit);
+			vty_out(vty,
+				"                  %9zu bytes buffer size limit\n",
+				bmpbgp->mirror_qsizelimit);
 		vty_out(vty, "\n");
 
 		vty_out(vty, "  Startup delay : %s",
@@ -3476,7 +3461,6 @@ DEFPY(show_bmp,
 					       state_str,
 					       ba->last_err ? ba->last_err : "",
 					       uptime, &ba->addrsrc);
-				continue;
 			}
 			out = ttable_dump(tt, "\n");
 			vty_out(vty, "%s", out);
@@ -3514,6 +3498,49 @@ DEFPY(show_bmp,
 			vty_out(vty, "\n");
 		}
 	}
+}
+
+static void bmp_show_locked(struct vty *vty)
+{
+
+	vty_out(vty, "BMP: BGP Paths locked for use in the Monitoring\n");
+	struct bmp_bpi_lock *lbpi_iter;
+	frr_each (bmp_lbpi_h, &bmp_lbpi, lbpi_iter) {
+		if (!lbpi_iter)
+			continue;
+
+		vty_out(vty, "Bucket:\n");
+
+		int n = 0;
+		struct bmp_bpi_lock *lbpi_curr = lbpi_iter;
+		do {
+			if (!lbpi_curr->locked) {
+				vty_out(vty, " [%d] Empty node\n", n);
+				continue;
+			}
+
+			vty_out(vty,
+				" [#%d][lock=%d] %s: bgp id=%" PRId64
+				" dest=%pRN rx_id=%" PRIu32 " from peer=%pBP\n",
+				n, lbpi_curr->lock, n == 0 ? "head" : "node",
+				lbpi_curr->bgp
+					? (uint64_t)lbpi_curr->bgp->vrf_id
+					: -1,
+				lbpi_curr->locked->net,
+				lbpi_curr->locked->addpath_rx_id,
+				lbpi_curr->locked->peer);
+			n++;
+		} while ((lbpi_curr = lbpi_curr->next));
+	}
+}
+
+DEFPY(show_bmp, show_bmp_cmd, "show bmp [locked]$locked",
+      SHOW_STR BMP_STR "Display information specific to paths locked by BMP\n")
+{
+	if (locked)
+		bmp_show_locked(vty);
+	else
+		bmp_show_bmp(vty);
 
 	return CMD_SUCCESS;
 }
@@ -3653,7 +3680,7 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	 * calls
 	 */
 	if (is_withdraw)
-		bmp_mainlock_bpi(updated_route);
+		bmp_lock_bpi(bgp, updated_route);
 
 	frr_each (bmp_targets, &bmpbgp->targets, bt) {
 		is_locribmon_enabled |=
@@ -3742,6 +3769,7 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 			{ /* scope lock the vars declared by lookup */
 				BMP_LBPI_LOOKUP_DEST(
 					head, prev, lbpi, dest,
+					SUBGRP_INST(subgrp),
 					bgp_addpath_id_for_peer(
 						SUBGRP_PEER(subgrp),
 						SUBGRP_AFI(subgrp),
@@ -3823,9 +3851,9 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 	return 0;
 }
 
-static int bmp_path_unlock(struct bgp_path_info *path)
+static int bmp_path_unlock(struct bgp *bgp, struct bgp_path_info *path)
 {
-	return bmp_mainunlock_bpi(path);
+	return bmp_unlock_bpi(bgp, path) == NULL;
 }
 
 static int bgp_bmp_module_init(void)

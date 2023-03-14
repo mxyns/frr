@@ -957,7 +957,7 @@ void subgroup_default_originate(struct update_subgroup *subgrp, int withdraw)
 	dest = bgp_safi_node_lookup(bgp->rib[afi][safi_rib], safi_rib, &p,
 				    NULL);
 
-	// TODO BMP hook call for pre-policy
+	// TODO BMP hook call for rib-out pre-policy
 
 	if (withdraw) {
 		/* Withdraw the default route advertised using default
