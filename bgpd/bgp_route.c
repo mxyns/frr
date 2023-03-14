@@ -2635,61 +2635,6 @@ static void bgp_route_select_timer_expire(struct thread *thread)
 	bgp_best_path_select_defer(bgp, afi, safi);
 }
 
-
-static void bgp_show_path_flags(struct bgp_path_info *bpi) {
-	const char *names[19] = {"BGP_PATH_IGP_CHANGED",
-				 "BGP_PATH_DAMPED",
-				 "BGP_PATH_HISTORY",
-				 "BGP_PATH_SELECTED",
-				 "BGP_PATH_VALID",
-				 "BGP_PATH_ATTR_CHANGED",
-				 "BGP_PATH_DMED_CHECK",
-				 "BGP_PATH_DMED_SELECTED",
-				 "BGP_PATH_STALE",
-				 "BGP_PATH_REMOVED",
-				 "BGP_PATH_COUNTED",
-				 "BGP_PATH_MULTIPATH",
-				 "BGP_PATH_MULTIPATH_CHG",
-				 "BGP_PATH_RIB_ATTR_CHG",
-				 "BGP_PATH_ANNC_NH_SELF",
-				 "BGP_PATH_LINK_BW_CHG",
-				 "BGP_PATH_ACCEPT_OWN",
-				 "BGP_PATH_BMP_LOCKED",
-				 "BGP_PATH_BMP_ADJ_CHG"};
-
-	if (!bpi) {
-		zlog_info("%s: bpi is null", __func__);
-		return;
-	}
-
-	zlog_info("%s: bpi frmo peer=%pBP rx=%"PRIu32, __func__, bpi->peer, bpi->addpath_rx_id);
-
-	for (int index = 0; index < 19; index++) {
-		if (CHECK_FLAG(bpi->flags, (1 << index)))
-			zlog_info("%s: flag %s", __func__, names[index]);
-	}
-}
-
-static void bgp_show_mpath_info(struct bgp_path_info *bpi) {
-
-	if (!bpi) {
-		zlog_info("%s: bpi is null", __func__);
-		return;
-	}
-
-	if (!bpi->mpath) {
-		zlog_info("%s: mpath is null", __func__);
-		return;
-	}
-
-	for (struct bgp_path_info_mpath* mpath = bpi->mpath; mpath; mpath = mpath->mp_next) {
-		zlog_info(
-			"%s: mp_count=%"PRIu16", mp_flags=%"PRIu16", mp_info=%p, mp_info_rx=%d",
-			__func__, mpath->mp_count, mpath->mp_flags, mpath->mp_info, (int)(mpath->mp_info ? mpath->mp_info->addpath_rx_id : -1));
-		bgp_show_path_flags(mpath->mp_info);
-	}
-}
-
 void bgp_best_selection(struct bgp *bgp, struct bgp_dest *dest,
 			struct bgp_maxpaths_cfg *mpath_cfg,
 			struct bgp_path_info_pair *result, afi_t afi,
@@ -2920,14 +2865,6 @@ void bgp_best_selection(struct bgp *bgp, struct bgp_dest *dest,
 			}
 		}
 	}
-
-	zlog_info("%s: before DP old_select flags", __func__);
-	bgp_show_path_flags(old_select);
-	bgp_show_mpath_info(old_select);
-
-	zlog_info("%s: after DP new_select flags", __func__);
-	bgp_show_path_flags(new_select);
-	bgp_show_mpath_info(new_select);
 
 	bgp_path_info_mpath_update(bgp, dest, new_select, old_select, &mp_list,
 				   mpath_cfg, mpath_diff_list);
@@ -3219,8 +3156,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	old_select = old_and_new.old;
 	new_select = old_and_new.new;
 
-	zlog_info("BGP DP DONE");
-
 	/* Do we need to allocate or free labels?
 	 * Right now, since we only deal with per-prefix labels, it is not
 	 * necessary to do this upon changes to best path. Exceptions:
@@ -3282,29 +3217,20 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 			  new_select);
 	}
 
-	if (old_select)
-		zlog_info("old_select %p, dest=%p, rx_id=%"PRIu32", peer=%pBP", old_select, old_select->net, old_select->addpath_rx_id, old_select->peer);
-	else
-		zlog_info("old_select null");
-
-	if (new_select)
-		zlog_info("new_select %p, dest=%p, rx_id=%"PRIu32", peer=%pBP", new_select, new_select->net, new_select->addpath_rx_id, new_select->peer);
-	else
-		zlog_info("new_select null");
-
-	zlog_info("%s: multipath diff %p computed, mpath_changed=%d", __func__, &mpath_diff, (int)bgp_mpath_diff_count(&mpath_diff));
+	if (debug)
+		zlog_debug("%s: multipath diff %p computed, mpath_changed=%d", __func__, &mpath_diff, (int)bgp_mpath_diff_count(&mpath_diff));
 	frr_each (bgp_mpath_diff, &mpath_diff, diff) {
-		if (!diff->path)
-			zlog_info("[%s] diff: %p ", diff->update ? "+" : "-", diff);
-		else {
-			zlog_info(
-				"[%s] bpi: %p, dest=%pRN peer=%pBP, rx_id=%" PRIu32,
-				diff->update ? "+" : "-", diff->path,
-				diff->path->net, diff->path->peer,
-				diff->path->addpath_rx_id);
+		if (diff->path) {
+			if (debug)
+				zlog_debug(
+					"[%s] bpi: %p, dest=%pRN peer=%pBP, rx_id=%" PRIu32,
+					diff->update ? "+" : "-", diff->path,
+					diff->path->net, diff->path->peer,
+					diff->path->addpath_rx_id);
 
 			hook_call(bgp_route_update, bgp, afi, safi, dest, diff->path, diff->update ? diff->path : NULL);
-		}
+		} else if (debug)
+			zlog_debug("[%s] diff: %p no path", diff->update ? "+" : "-", diff);
 	}
 
 	/* If best route remains the same and this is not due to user-initiated
@@ -3366,7 +3292,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		bgp_zebra_clear_route_change_flags(dest);
 		UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
 
-		zlog_info("BGP DP EARLY OUT");
 		goto out;
 	}
 
@@ -3479,9 +3404,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
 
 out:
-	// TODO HERE CALL BMP MAIN UNLOCK FOR THE LOCKED BPIs
-	// CAN PROBABLY REMOVE THE MAIN LOCK THINGY TOO
-
 	if (old_select || new_select)
 		hook_call(bgp_process_main_one_end, old_select && !new_select ? old_select : new_select);
 

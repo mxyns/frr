@@ -454,9 +454,6 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 			 struct attr *attr, bool post_policy, bool withdraw,
 			 const char *caller)
 {
-
-	zlog_info("%s: subgrp_id=%d, dest=%pRN path=%p, tx_id=%"PRIu32", attr=%p, post=%d, withdraw=%d, from=%s", __func__, (int)(subgrp ? subgrp->id : -1), dest, path, addpath_tx, attr, post_policy, withdraw, caller);
-
 	hook_call(bgp_adj_out_updated, subgrp, dest, path, addpath_tx, attr,
 		  post_policy, withdraw);
 }

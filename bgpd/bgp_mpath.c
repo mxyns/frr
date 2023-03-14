@@ -755,8 +755,6 @@ void bgp_path_info_mpath_update(struct bgp *bgp, struct bgp_dest *dest,
 		}
 	}
 
-	zlog_info("MPATH CHANGED ? %d", mpath_changed);
-
 	if (new_best) {
 		bgp_path_info_mpath_count_set(new_best, mpath_count - 1);
 		if (mpath_count <= 1 ||
