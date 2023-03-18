@@ -1110,6 +1110,7 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 
+	/* wrap in tlv and record header length */
 	size_t tlv_hdr_pos_before = stream_get_endp(s);
 	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_BGP_PDU, 0, 0);
 	size_t tlv_hdr_pos_after = stream_get_endp(s);
@@ -1136,7 +1137,9 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 		stream_putc(s, pkt_safi);
 	}
 
+	/* set bgp packet size ignoring tlv header size */
 	bgp_packet_set_size_with_offset(s, tlv_hdr_pos_after);
+	/* set tlv length  */
 	stream_putw_at(s, tlv_hdr_pos_before + BMP_INFO_OFFSET_TLV_LENGTH, stream_get_endp(s) - tlv_hdr_pos_after);
 
 	for (ALL_LIST_ELEMENTS_RO(bmp->targets->bgp->peer, node, peer)) {
@@ -1186,6 +1189,7 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 
+	/* wrap in tlv and record header length */
 	tlv_hdr_pos_before = stream_get_endp(s);
 	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_BGP_PDU, 0, 0);
 	tlv_hdr_pos_after = stream_get_endp(s);
@@ -1221,10 +1225,11 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 		bgp_packet_mpattr_end(s, mpattrlen_pos);
 		total_attr_len += stream_get_endp(s) - p1;
 	}
-
 	/* set the total attribute length correctly */
 	stream_putw_at(s, attrlen_pos, total_attr_len);
+	/* set bgp packet size ignoring tlv header size */
 	bgp_packet_set_size_with_offset(s, tlv_hdr_pos_after);
+	/* set tlv length  */
 	stream_putw_at(s, tlv_hdr_pos_before + BMP_INFO_OFFSET_TLV_LENGTH, stream_get_endp(s) - tlv_hdr_pos_after);
 
 	return s;
@@ -1242,6 +1247,10 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 	bgp_size_t unfeasible_len;
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);
+
+
+	/* wrap in tlv and record header length */
+
 	tlv_hdr_pos_before = stream_get_endp(s);
 	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_BGP_PDU, 0, 0);
 	tlv_hdr_pos_after = stream_get_endp(s);
@@ -1271,8 +1280,9 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 		total_attr_len = stream_get_endp(s) - mp_start;
 		stream_putw_at(s, attrlen_pos, total_attr_len);
 	}
-
+	/* set bgp packet size ignoring tlv header size */
 	bgp_packet_set_size_with_offset(s, tlv_hdr_pos_after);
+	/* set tlv length  */
 	stream_putw_at(s, tlv_hdr_pos_before + BMP_INFO_OFFSET_TLV_LENGTH, stream_get_endp(s) - tlv_hdr_pos_after);
 	return s;
 }
@@ -1304,13 +1314,6 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 		msg = bmp_update(p, prd, addpath_id, peer, attr, afi, safi);
 	else
 		msg = bmp_withdraw(p, prd, addpath_id, afi, safi);
-
-	bmp_put_info_tlv_hdr_with_index(msg, BMP_INFO_TYPE_GROUP, BMP_INFO_LENGTH_ITEM_SIZE, 0);
-	stream_putw(msg, 1);
-	bmp_put_info_tlv_hdr_with_index(msg, BMP_INFO_TYPE_GROUP, 3 * BMP_INFO_LENGTH_ITEM_SIZE, 0);
-	stream_putw(msg, 69);
-	stream_putw(msg, 42);
-	stream_putw(msg, 38);
 
 	hdr = stream_new(BGP_MAX_PACKET_SIZE);
 	bmp_common_hdr(hdr, BMP_VERSION_3, BMP_TYPE_ROUTE_MONITORING);
