@@ -86,6 +86,22 @@ int bgp_packet_set_marker(struct stream *s, uint8_t type)
 }
 
 /**
+ * Sets size field for a BGP message with an offset.
+ * Useful when there are offset bytes before the BGP Message
+ * in the given stream
+ *
+ * Size field is set to the size of the stream passed
+ * minus the offset in the stream.
+ *
+ * @param s the stream containing the packet
+ * @param offset how much bytes the marker is offset of
+ */
+inline void bgp_packet_set_size_with_offset(struct stream *s, size_t offset)
+{
+	stream_putw_at(s, BGP_MARKER_SIZE + offset, stream_get_endp(s) - offset);
+}
+
+/**
  * Sets size field for a BGP message.
  *
  * Size field is set to the size of the stream passed.
@@ -94,11 +110,7 @@ int bgp_packet_set_marker(struct stream *s, uint8_t type)
  */
 void bgp_packet_set_size(struct stream *s)
 {
-	int cp;
-
-	/* Preserve current pointer. */
-	cp = stream_get_endp(s);
-	stream_putw_at(s, BGP_MARKER_SIZE, cp);
+	bgp_packet_set_size_with_offset(s, 0);
 }
 
 /*
