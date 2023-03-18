@@ -1268,6 +1268,9 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 	bgp_size_t unfeasible_len;
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);
+	tlv_hdr_pos_before = stream_get_endp(s);
+	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_BGP_PDU, 0, 0);
+	tlv_hdr_pos_after = stream_get_endp(s);
 
 
 	/* wrap in tlv and record header length */
