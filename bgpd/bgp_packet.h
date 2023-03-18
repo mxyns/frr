@@ -65,6 +65,7 @@ extern void bgp_check_update_delay(struct bgp *);
 
 extern int bgp_packet_set_marker(struct stream *s, uint8_t type);
 extern void bgp_packet_set_size(struct stream *s);
+extern void bgp_packet_set_size_with_offset(struct stream *s, size_t offset);
 
 extern void bgp_generate_updgrp_packets(struct thread *);
 extern void bgp_process_packet(struct thread *);

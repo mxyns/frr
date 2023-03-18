@@ -14,7 +14,7 @@
 #include "resolver.h"
 #include "bgp_updgrp.h"
 
-#define BMP_VERSION_3	3
+#define BMP_VERSION_3	4
 
 #define BMP_LENGTH_POS  1
 
@@ -26,6 +26,23 @@
 #define BMP_TYPE_INITIATION             4
 #define BMP_TYPE_TERMINATION            5
 #define BMP_TYPE_ROUTE_MIRRORING        6
+
+/* BMP TLV Types */
+#define BMP_INFO_TYPE_SYSDESCR		1
+#define BMP_INFO_TYPE_SYSNAME		2
+#define BMP_INFO_TYPE_VRFTABLENAME 	3
+#define BMP_INFO_TYPE_BGP_PDU		4
+#define BMP_INFO_TYPE_GROUP		5
+#define BMP_INFO_TYPE_ASN4_CAP		6
+#define BMP_INFO_TYPE_ADDPATH_CAP	7
+#define BMP_INFO_TYPE_MULTLBL_CAP	8
+
+/* Packet Field Offsets */
+/* Offset of the Length field in the TLV */
+#define BMP_INFO_OFFSET_TLV_LENGTH	(sizeof(uint16_t))
+
+/* BMP TLV Related Lengths */
+#define BMP_INFO_LENGTH_ITEM_SIZE	(2)
 
 #define BMP_READ_BUFSIZ	1024
 
