@@ -24,6 +24,7 @@
 #include "lib/version.h"
 #include "jhash.h"
 #include "termtable.h"
+#include "string.h"
 #include "time.h"
 
 #include "bgpd/bgp_table.h"
@@ -582,8 +583,8 @@ inline static void bmp_put_info_tlv_hdr_with_index(struct stream *s, uint16_t ty
 __attribute__((__unused__))
 inline static void bmp_put_info_tlv_capability(struct stream *s, uint16_t type) {
 
-	bmp_put_info_tlv_hdr(s, type, BMP_INFO_LENGTH_ITEM_SIZE);
-	stream_putw(s, 1);
+	bmp_put_info_tlv_hdr(s, type, BMP_INFO_LENGTH_CAPABILITY_SIZE);
+	stream_putc(s, 1);
 }
 
 /* add a GROUP TLV containing reference to 'count' NLRIs for found in 'indices'
@@ -592,15 +593,16 @@ __attribute__((__unused__))
 inline static void bmp_put_info_tlv_group(struct stream *s, uint16_t *indices, int count) {
 
 	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_GROUP,
-			     count * BMP_INFO_LENGTH_ITEM_SIZE, 0);
+			     count * BMP_INFO_LENGTH_GROUP_ITEM_SIZE, 0);
 	stream_put(s, indices, count * sizeof(*indices));
 }
 
 /* put a string tlv with type 'type' to the stream */
 static void bmp_put_info_tlv_str(struct stream *s, uint16_t type,
-		const char *string)
+		const char *string, uint16_t maxlen)
 {
 	uint16_t len = (uint16_t) strlen(string);
+	len = maxlen > 0 && len > maxlen ? maxlen : len;
 	bmp_put_info_tlv_hdr(s, type, len);
 	stream_put(s, string, len);
 }
@@ -608,18 +610,37 @@ static void bmp_put_info_tlv_str(struct stream *s, uint16_t type,
 /* put the vrf table name of the bgp instance bmp is bound to in a tlv on the
  * stream */
 static void __attribute__((unused))
-bmp_put_vrftablename_info_tlv(struct stream *s, struct bmp *bmp)
+bmp_put_info_tlv_vrftablename_with_index(struct stream *s, struct bgp *bgp,
+					 uint16_t index) {
+
+	const char *vrftablename = "global";
+	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
+		struct vrf *vrf = vrf_lookup_by_id(bgp->vrf_id);
+
+		vrftablename = vrf ? vrf->name : NULL;
+	}
+	if (vrftablename != NULL) {
+		size_t len = strlen(vrftablename);
+		len = len > BMP_INFO_LENGTH_TABLE_NAME_MAX ? BMP_INFO_LENGTH_TABLE_NAME_MAX : len;
+		bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_VRFTABLENAME,
+						len, index);
+		stream_put(s, vrftablename, len);
+	}
+}
+
+static void __attribute__((unused))
+bmp_put_info_tlv_vrftablename(struct stream *s, struct bgp *bgp)
 {
 
 	const char *vrftablename = "global";
-	if (bmp->targets->bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
-		struct vrf *vrf = vrf_lookup_by_id(bmp->targets->bgp->vrf_id);
+	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
+		struct vrf *vrf = vrf_lookup_by_id(bgp->vrf_id);
 
 		vrftablename = vrf ? vrf->name : NULL;
 	}
 	if (vrftablename != NULL)
 		bmp_put_info_tlv_str(s, BMP_INFO_TYPE_VRFTABLENAME,
-				     vrftablename);
+				     vrftablename, BMP_INFO_LENGTH_TABLE_NAME_MAX);
 }
 
 /* send initiation message */
@@ -631,8 +652,8 @@ static int bmp_send_initiation(struct bmp *bmp)
 	bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_INITIATION);
 
 	bmp_put_info_tlv_str(s, BMP_INFO_TYPE_SYSDESCR,
-			     FRR_FULL_NAME " " FRR_VER_SHORT);
-	bmp_put_info_tlv_str(s, BMP_INFO_TYPE_SYSNAME, cmd_hostname_get());
+			     FRR_FULL_NAME " " FRR_VER_SHORT, 0);
+	bmp_put_info_tlv_str(s, BMP_INFO_TYPE_SYSNAME, cmd_hostname_get(), 0);
 
 	len = stream_get_endp(s);
 	stream_putl_at(s, BMP_LENGTH_POS, len); //message length is set.
@@ -731,7 +752,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 		}
 
 		if (peer->desc)
-			bmp_put_info_tlv_str(s, 0, peer->desc);
+			bmp_put_info_tlv_str(s, 0, peer->desc, 0);
 	} else {
 		uint8_t type;
 		size_t type_pos;
