@@ -1492,6 +1492,7 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	bmp_per_peer_hdr(hdr, bmp->targets->bgp, peer, flags, peer_type,
 			 peer_distinguisher,
 			 uptime == (time_t)(-1L) ? NULL : &uptime_real);
+	bmp_put_info_tlv_vrftablename_with_index(msg, bmp->targets->bgp, 0);
 
 	stream_putl_at(hdr, BMP_LENGTH_POS,
 		stream_get_endp(hdr) + stream_get_endp(msg));
