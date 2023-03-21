@@ -3474,24 +3474,29 @@ static void bmp_show_bmp(struct vty *vty) {
 static void bmp_show_locked(struct vty *vty) {
 
 	vty_out(vty, "BMP: BGP Paths locked for use in the Monitoring\n");
-	struct bmp_bpi_lock* lbpi;
-	frr_each(bmp_lbpi_h, &bmp_lbpi, lbpi) {
-		if (!lbpi)
+	struct bmp_bpi_lock *lbpi_iter;
+	frr_each(bmp_lbpi_h, &bmp_lbpi, lbpi_iter) {
+		if (!lbpi_iter)
 			continue;
 
 		vty_out(vty, "Bucket:\n");
 
 		int n = 0;
+		struct bmp_bpi_lock *lbpi_curr = lbpi_iter;
 		do {
-			if (!lbpi->locked) {
-				zlog_info(" [%d] Empty node\n", n);
+			if (!lbpi_curr->locked) {
+				vty_out(vty, " [%d] Empty node\n", n);
 				continue;
 			}
 
-			vty_out(vty, " [#%d][lock=%d] %s: bgp id=%"PRIu32" dest=%pRN rx_id=%"PRIu32" from peer=%pBP\n",
-				n, lbpi->lock, n == 0 ? "head" : "node", lbpi->bgp->vrf_id, lbpi->locked->net, lbpi->locked->addpath_rx_id, lbpi->locked->peer);
+			vty_out(vty, " [#%d][lock=%d] %s: bgp id=%"PRId64" dest=%pRN rx_id=%"PRIu32" from peer=%pBP\n",
+				n, lbpi_curr->lock, n == 0 ? "head" : "node",
+				lbpi_curr->bgp ? (uint64_t)lbpi_curr->bgp->vrf_id : -1,
+				lbpi_curr->locked->net,
+				lbpi_curr->locked->addpath_rx_id,
+				lbpi_curr->locked->peer);
 			n++;
-		} while (lbpi && (lbpi = lbpi->next) && lbpi);
+		} while ((lbpi_curr = lbpi_curr->next));
 	}
 }
 
