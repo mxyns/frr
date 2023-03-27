@@ -77,6 +77,26 @@ RB_HEAD(bgp_adj_out_rb, bgp_adj_out);
 RB_PROTOTYPE(bgp_adj_out_rb, bgp_adj_out, adj_entry,
 	     bgp_adj_out_compare);
 
+enum bgp_inbound_filtered_reason {
+	bgp_inbound_filtered_none,
+	bgp_inbound_filtered_local_as_path_loop,
+	bgp_inbound_filtered_as_path_loop,
+	bgp_inbound_filtered_confed_loop,
+	bgp_inbound_filtered_self_originated,
+	bgp_inbound_filtered_RR_loop,
+	bgp_inbound_filtered_filter_policy,
+	bgp_inbound_filtered_ebgp_requires_policy,
+	bgp_inbound_filtered_reject_as_sets,
+	bgp_inbound_filtered_routemap_policy,
+	bgp_inbound_filtered_nhs_or_martian,
+	bgp_inbound_filtered_nhs_mac,
+	bgp_inbound_filtered_otc,
+	bgp_inbound_filtered_maximum_prefix_overflow,
+};
+
+
+extern const char *bgp_inbound_filtered_reason_str(enum bgp_inbound_filtered_reason reason);
+
 /* BGP adjacency in. */
 struct bgp_adj_in {
 	/* Linked list pointer.  */
@@ -94,6 +114,12 @@ struct bgp_adj_in {
 
 	/* Addpath identifier */
 	uint32_t addpath_rx_id;
+
+	/* Whether this has been filtered by inbound policy */
+	bool filtered;
+
+	/* reason for inbound filtering */
+	enum bgp_inbound_filtered_reason reason;
 };
 
 /* BGP advertisement list.  */
@@ -129,7 +155,7 @@ struct bgp_synchronize {
 /* Prototypes.  */
 extern bool bgp_adj_out_lookup(struct peer *peer, struct bgp_dest *dest,
 			       uint32_t addpath_tx_id);
-extern void bgp_adj_in_set(struct bgp_node *dest, afi_t afi, safi_t safi,
+extern struct bgp_adj_in *bgp_adj_in_set(struct bgp_node *dest, afi_t afi, safi_t safi,
 			   struct peer *peer, struct attr *attr,
 			   uint32_t addpath_id);
 extern bool bgp_adj_in_unset(struct bgp_node *dest, afi_t afi, safi_t safi,

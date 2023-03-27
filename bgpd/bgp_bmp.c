@@ -634,6 +634,7 @@ bmp_put_info_tlv_vrftablename(struct stream *s, struct bgp *bgp)
 
 	const char *vrftablename = "global";
 	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
+
 		struct vrf *vrf = vrf_lookup_by_id(bgp->vrf_id);
 
 		vrftablename = vrf ? vrf->name : NULL;
@@ -643,10 +644,261 @@ bmp_put_info_tlv_vrftablename(struct stream *s, struct bgp *bgp)
 				     vrftablename, BMP_INFO_LENGTH_TABLE_NAME_MAX);
 }
 
+enum bmp_path_status_code {
+	bmp_path_status_reserved	= 0x00000000,
+	bmp_path_status_invalid		= 0x00000001,
+	bmp_path_status_best		= 0x00000002,
+	bmp_path_status_non_selected	= 0x00000004,
+	bmp_path_status_primary		= 0x00000008,
+	bmp_path_status_backup		= 0x00000010,
+	bmp_path_status_non_installed	= 0x00000020,
+	bmp_path_status_best_external	= 0x00000040,
+	bmp_path_status_addpath		= 0x00000080,
+	bmp_path_status_filtered_in	= 0x00000100,
+	bmp_path_status_filtered_out	= 0x00000200,
+	bmp_path_status_invalid_rov	= 0x00000400,
+};
+
+enum bmp_path_status_reason_code {
+
+	bmp_path_status_reason_reserved					= 0x0000,
+	bmp_path_status_reason_invalid_for_AS_loop			= 0x0006,
+	bmp_path_status_reason_invalid_for_unresolvable_nexthop        	= 0x0007,
+	bmp_path_status_reason_not_preferred_for_Local_preference      	= 0x0016,
+	bmp_path_status_reason_not_preferred_for_AS_Path_Length        	= 0x0014,
+	bmp_path_status_reason_not_preferred_for_origin                	= 0x0013,
+	bmp_path_status_reason_not_preferred_for_MED                   	= 0x0012,
+	bmp_path_status_reason_not_preferred_for_peer_type             	= 0x0011,
+	bmp_path_status_reason_not_preferred_for_IGP_cost              	= 0x0010,
+	bmp_path_status_reason_not_preferred_for_router_ID             	= 0x000E,
+	bmp_path_status_reason_not_preferred_for_peer_address          	= 0x000D,
+	bmp_path_status_reason_not_preferred_for_AIGP	                = 0x0020
+};
+
+enum bgp_reason_type {
+	bgp_path_selection_reason,
+	bgp_inbound_filtered_reason,
+};
+
+struct bgp_reason {
+	enum bgp_reason_type type;
+	union {
+		enum bgp_path_selection_reason select_reason;
+		enum bgp_inbound_filtered_reason inbound_reason;
+	};
+};
+
+static inline struct bgp_reason
+bmp_make_bgp_reason_select(struct bgp_dest* dest) {
+	return (struct bgp_reason) {
+		.type = bgp_path_selection_reason,
+		.select_reason = dest ? dest->reason : bgp_path_selection_none,
+	};
+}
+
+static inline struct bgp_reason
+bmp_make_bgp_reason_inbound(struct bgp_adj_in* adjin) {
+	return (struct bgp_reason) {
+		.type = bgp_inbound_filtered_reason,
+		.inbound_reason = adjin ? adjin->reason : bgp_inbound_filtered_none,
+	};
+}
+
+struct bmp_path_status {
+
+	bool precomputed;
+	union {
+		struct {
+			enum bmp_path_status_code status_code;
+			enum bmp_path_status_reason_code reason_code;
+		};
+
+		struct {
+			uint32_t bpi_flags;
+			uint16_t dest_flags;
+			struct bgp_reason reason;
+		};
+	};
+};
+
+static enum bmp_path_status_code bmp_path_status_get_status(uint32_t bpi_flags, uint16_t dest_flags) {
+
+	enum bmp_path_status_code status = bmp_path_status_reserved;
+
+	if (!CHECK_FLAG(bpi_flags, BGP_PATH_VALID))
+		status |= bmp_path_status_invalid;
+
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
+		status |= bmp_path_status_best;
+	else
+		status |= bmp_path_status_non_selected;
+
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH)
+	    && CHECK_FLAG(dest_flags, BGP_NODE_FIB_INSTALLED))
+		status |= bmp_path_status_non_installed;
+
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED))
+		status |= bmp_path_status_primary;
+
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_MULTIPATH))
+		status |= bmp_path_status_backup | bmp_path_status_addpath;
+
+
+	// TODO
+	// 0x00000040 bmp_path_status_best_external (NEED IMPLEMENT)
+	// 0x00000080 bmp_path_status_addpath (NEED PRECISE DEFINITION)
+	// 0x00000100 bmp_path_status_filtered_in (WIP)
+	// 0x00000200 bmp_path_status_filtered_out (NEED IMPLEMENT)
+	// 0x00000400 bmp_path_status_invalid_rov (NO IDEA)
+
+
+	return status;
+}
+
+
+static enum bmp_path_status_reason_code
+bmp_path_status_get_reason(struct bgp_reason reason)
+{
+
+	switch (reason.type) {
+	case bgp_path_selection_reason:
+		goto select_reason;
+	case bgp_inbound_filtered_reason:
+		goto filter_in_reason;
+	default:
+		zlog_warn("%s: Unknown path status reason type!", __func__);
+		return bmp_path_status_reason_reserved;
+	}
+
+select_reason:
+	switch(reason.select_reason) {
+	case bgp_path_selection_local_pref:
+		return bmp_path_status_reason_not_preferred_for_Local_preference;
+	case bgp_path_selection_aigp:
+		return bmp_path_status_reason_not_preferred_for_AIGP;
+	case bgp_path_selection_confed_as_path:
+	case bgp_path_selection_as_path:
+		return bmp_path_status_reason_not_preferred_for_AS_Path_Length;
+	case bgp_path_selection_origin:
+		return bmp_path_status_reason_not_preferred_for_origin;
+	case bgp_path_selection_med:
+		return bmp_path_status_reason_not_preferred_for_MED;
+	case bgp_path_selection_peer:
+		return bmp_path_status_reason_not_preferred_for_peer_type;
+	case bgp_path_selection_igp_metric:
+		return bmp_path_status_reason_not_preferred_for_IGP_cost;
+	case bgp_path_selection_router_id:
+		return bmp_path_status_reason_not_preferred_for_router_ID;
+	case bgp_path_selection_neighbor_ip:
+		return bmp_path_status_reason_not_preferred_for_peer_address;
+	case bgp_path_selection_none:
+	case bgp_path_selection_default:
+	case bgp_path_selection_first:
+	case bgp_path_selection_older:
+	case bgp_path_selection_weight:
+	case bgp_path_selection_local_route:
+	case bgp_path_selection_stale:
+	case bgp_path_selection_confed:
+	case bgp_path_selection_cluster_length:
+	case bgp_path_selection_local_configured:
+	case bgp_path_selection_evpn_sticky_mac:
+	case bgp_path_selection_evpn_seq:
+	case bgp_path_selection_evpn_local_path:
+	case bgp_path_selection_evpn_non_proxy:
+	case bgp_path_selection_evpn_lower_ip:
+	case bgp_path_selection_accept_own:
+	default:
+		return bmp_path_status_reason_reserved;
+	}
+
+filter_in_reason:
+	switch(reason.inbound_reason) {
+	case bgp_inbound_filtered_local_as_path_loop:
+	case bgp_inbound_filtered_as_path_loop:
+	case bgp_inbound_filtered_confed_loop:
+	case bgp_inbound_filtered_RR_loop:
+		return bmp_path_status_reason_invalid_for_AS_loop;
+	case bgp_inbound_filtered_nhs_or_martian:
+	case bgp_inbound_filtered_nhs_mac:
+		return bmp_path_status_reason_invalid_for_unresolvable_nexthop;
+	case bgp_inbound_filtered_none:
+	case bgp_inbound_filtered_self_originated:
+	case bgp_inbound_filtered_filter_policy:
+	case bgp_inbound_filtered_ebgp_requires_policy:
+	case bgp_inbound_filtered_reject_as_sets:
+	case bgp_inbound_filtered_routemap_policy:
+	case bgp_inbound_filtered_otc:
+	case bgp_inbound_filtered_maximum_prefix_overflow:
+	default:
+		return bmp_path_status_reason_reserved;
+	}
+
+}
+
+
+static inline struct bmp_path_status bmp_make_path_status(
+	struct bgp_path_info *bpi,
+	struct bgp_dest *dest) {
+
+	return (struct bmp_path_status) {
+		.precomputed = false,
+		.bpi_flags = bpi ? bpi->flags : 0,
+		.dest_flags = dest ? dest->flags : 0,
+		.reason = bmp_make_bgp_reason_select(dest),
+	};
+}
+
+static inline struct bmp_path_status bmp_make_path_status_precomputed(
+	enum bmp_path_status_code status_code,
+	enum bmp_path_status_reason_code reason_code) {
+
+	return (struct bmp_path_status) {
+		.precomputed = true,
+		.status_code = status_code,
+		.reason_code = reason_code,
+	};
+}
+
+static inline struct bmp_path_status bmp_make_path_status_precomputed_adjin(
+	struct bgp_adj_in *adjin) {
+
+	return bmp_make_path_status_precomputed(
+		adjin && adjin->filtered ? bmp_path_status_filtered_in
+					 : bmp_path_status_reserved,
+		bmp_path_status_get_reason(bmp_make_bgp_reason_inbound(adjin)));
+}
+
+static void bmp_put_info_tlv_path_status(struct stream *s, struct bmp_path_status status)
+{
+	bool E_bit = false;
+	enum bmp_path_status_code status_code = status.status_code;
+	enum bmp_path_status_reason_code reason_code = status.reason_code;
+
+	if (!status.precomputed) {
+		zlog_info("%s: status not precomputed bpi_flags=%"PRIu32"  dest_flags=%"PRIu16, __func__, status.bpi_flags, status.dest_flags);
+		zlog_info("%s: reason: type=%d, code=%d", __func__, status.reason.type, status.reason.type == bgp_path_selection_reason ? status.reason.select_reason : status.reason.inbound_reason);
+		status_code = bmp_path_status_get_status(status.bpi_flags, status.dest_flags);
+		reason_code = bmp_path_status_get_reason(status.reason);
+	} else {
+		zlog_info("%s: status precomputed", __func__);
+	}
+
+	zlog_info("%s: status is status_code=%"PRIu32"  reason_code=%"PRIu16, __func__, status_code, reason_code);
+
+	bool include_reason = reason_code != bmp_path_status_reason_reserved;
+
+	bmp_put_info_tlv_hdr_with_index(s,
+		BMP_INFO_TYPE_PATH_STATUS | (E_bit ? (1 << 15) : 0),
+		4 + (include_reason ? 2 : 0), 0);
+	stream_putl(s, (uint32_t) status_code);
+
+	if (include_reason)
+		stream_putw(s, (uint16_t) reason_code);
+}
+
 /* send initiation message */
 static int bmp_send_initiation(struct bmp *bmp)
 {
-	int len;
 	struct stream *s;
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 	bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_INITIATION);
@@ -655,8 +907,7 @@ static int bmp_send_initiation(struct bmp *bmp)
 			     FRR_FULL_NAME " " FRR_VER_SHORT, 0);
 	bmp_put_info_tlv_str(s, BMP_INFO_TYPE_SYSNAME, cmd_hostname_get(), 0);
 
-	len = stream_get_endp(s);
-	stream_putl_at(s, BMP_LENGTH_POS, len); //message length is set.
+	stream_putl_at(s, BMP_LENGTH_POS, stream_get_endp(s)); //message length is set.
 
 	pullwr_write_stream(bmp->pullwr, s);
 	stream_free(s);
@@ -1280,13 +1531,16 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 	tlv_hdr_pos_after = stream_get_endp(s);
 
 	bgp_packet_set_marker(s, BGP_MSG_UPDATE);
+
+	/* withdraw length temporary size */
+	size_t withdraw_len_pos = stream_get_endp(s);
 	stream_putw(s, 0);
 
 	if (afi == AFI_IP && safi == SAFI_UNICAST) {
+		size_t unfeasible_start = stream_get_endp(s);
 		stream_put_prefix_addpath(s, p, 1, addpath_id);
-		unfeasible_len = stream_get_endp(s) - BGP_HEADER_SIZE
-				 - BGP_UNFEASIBLE_LEN;
-		stream_putw_at(s, BGP_HEADER_SIZE, unfeasible_len);
+		unfeasible_len = stream_get_endp(s) - unfeasible_start;
+		stream_putw_at(s, withdraw_len_pos, unfeasible_len);
 		stream_putw(s, 0);
 	} else {
 		attrlen_pos = stream_get_endp(s);
@@ -1304,9 +1558,10 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 		total_attr_len = stream_get_endp(s) - mp_start;
 		stream_putw_at(s, attrlen_pos, total_attr_len);
 	}
+
 	/* set bgp packet size ignoring tlv header size */
 	bgp_packet_set_size_with_offset(s, tlv_hdr_pos_after);
-	/* set tlv length  */
+	/* set tlv length */
 	stream_putw_at(s, tlv_hdr_pos_before + BMP_INFO_OFFSET_TLV_LENGTH, stream_get_endp(s) - tlv_hdr_pos_after);
 	return s;
 }
@@ -1318,7 +1573,8 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 			uint8_t peer_type_flag, const struct prefix *p,
 			struct prefix_rd *prd, struct attr *attr, afi_t afi,
-			safi_t safi, uint32_t addpath_id, time_t uptime)
+			safi_t safi, uint32_t addpath_id, time_t uptime,
+			struct bmp_path_status path_status)
 {
 	struct stream *hdr, *msg;
 	struct timeval tv = { .tv_sec = uptime, .tv_usec = 0 };
@@ -1333,8 +1589,11 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 		return;
 	}
 
+	zlog_info("%s called: for peer %pBP prefix %pFX, attr %p, afi/safi %s, addpath %"PRIu32, __func__, peer, p, attr, get_afi_safi_str(afi, safi, false), addpath_id);
+
 	monotime_to_realtime(&tv, &uptime_real);
-	if (attr)
+	bool update = attr != NULL;
+	if (update)
 		msg = bmp_update(p, prd, addpath_id, peer, attr, afi, safi);
 	else
 		msg = bmp_withdraw(p, prd, addpath_id, afi, safi);
@@ -1344,10 +1603,14 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	bmp_per_peer_hdr(hdr, bmp->targets->bgp, peer, flags, peer_type_flag,
 			 peer_distinguisher,
 			 uptime == (time_t)(-1L) ? NULL : &uptime_real);
+
 	bmp_put_info_tlv_vrftablename_with_index(msg, bmp->targets->bgp, 0);
+	if (update)
+		bmp_put_info_tlv_path_status(hdr, path_status);
 
 	stream_putl_at(hdr, BMP_LENGTH_POS,
 		stream_get_endp(hdr) + stream_get_endp(msg));
+
 	bmp->cnt_update++;
 	pullwr_write_stream(bmp->pullwr, hdr);
 	pullwr_write_stream(bmp->pullwr, msg);
@@ -1396,8 +1659,8 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp, vo
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE,
 				    &ctx->dest->p, ctx->prd, ctx->attr,
 				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id,
-				    monotime(NULL));
+				    addpath_tx_id, monotime(NULL),
+				    bmp_make_path_status(ctx->bpi, ctx->dest));
 
 			*ctx->written_ref = true;
 		}
@@ -1478,7 +1741,8 @@ static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp, v
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE, ctx->pfx,
 				    ctx->prd, advertised_attr,
 				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id,monotime(NULL));
+				    addpath_tx_id, monotime(NULL),
+				    bmp_make_path_status(ctx->bpi, ctx->dest));
 
 			*ctx->written_ref = true;
 		}
@@ -1704,9 +1968,18 @@ afibreak:
 	bool written = false;
 
 	if (adjin) {
+		struct bmp_path_status path_status =
+			bmp_make_path_status_precomputed(
+				adjin->filtered ? bmp_path_status_filtered_in :
+						bmp_path_status_reserved,
+				bmp_path_status_get_reason(
+					bmp_make_bgp_reason_inbound(adjin)
+						)
+			);
+
 		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-			    bn_p, prd, adjin->attr, afi, safi, adjin->addpath_rx_id,
-			    adjin->uptime);
+			    bn_p, prd, adjin->attr, afi, safi,
+			    adjin->addpath_rx_id, adjin->uptime, path_status);
 		written = true;
 	}
 
@@ -1716,7 +1989,8 @@ afibreak:
 	    CHECK_FLAG(mon_flags, BMP_MON_IN_POSTPOLICY)) {
 		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
-			    afi, safi, bpi->addpath_rx_id, bpi->uptime);
+			    afi, safi, bpi->addpath_rx_id, bpi->uptime,
+			    bmp_make_path_status(bpi, bn));
 
 		UNSET_FLAG(bpi->flags, BGP_PATH_BMP_ADJIN_CHG);
 		written = true;
@@ -1729,7 +2003,8 @@ afibreak:
 		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    bn_p, prd, bpi->attr, afi, safi, bpi->addpath_rx_id,
 			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
-					      : (time_t)(-1L));
+					      : (time_t)(-1L),
+			    bmp_make_path_status(bpi, bn));
 		written = true;
 	}
 
@@ -1904,7 +2179,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 			bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 				    bpi->attr, afi, safi, addpath_rx_id,
-				    bpi->uptime);
+				    bpi->uptime, bmp_make_path_status(bpi, bn));
 			ribin = bpi;
 			written = true;
 		}
@@ -1917,7 +2192,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 			bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 				    &bqe->p, prd, bpi->attr, afi, safi, addpath_rx_id,
 				    bpi->extra ? bpi->extra->bgp_rib_uptime
-						      : (time_t)(-1L));
+					       : (time_t)(-1L),
+				    bmp_make_path_status(bpi, bn));
 			locrib = bpi;
 			written = true;
 		}
@@ -1930,9 +2206,9 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	if (CHECK_FLAG(flags, BMP_MON_IN_POSTPOLICY)
 	    && !ribin) {
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
-			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
-			    NULL, afi, safi, addpath_rx_id,
-			    (time_t)(-1));
+			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd, NULL,
+			    afi, safi, addpath_rx_id, (time_t)(-1),
+			    bmp_make_path_status(ribin, bn));
 		written = true;
 	}
 
@@ -1941,7 +2217,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	    && !locrib) {
 		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
-			    (time_t)(-1L));
+			    (time_t)(-1L),
+			    bmp_make_path_status(locrib, bn));
 		written = true;
 	}
 
@@ -1994,7 +2271,7 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 		      (bqe->safi == SAFI_MPLS_VPN);
 
 	struct prefix_rd *prd = is_vpn ? &bqe->rd : NULL;
-	bn = bgp_afi_node_lookup(bmp->targets->bgp->rib[afi][safi], afi, safi,
+	bn = bgp_afi_node_get(bmp->targets->bgp->rib[afi][safi], afi, safi,
 				 &bqe->p, prd);
 
 	struct bgp_adj_in *adjin;
@@ -2007,9 +2284,28 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 			break;
 	}
 
-	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
-		    &bqe->p, prd, adjin ? adjin->attr : NULL, afi, safi,
-		    addpath_rx_id, adjin ? adjin->uptime : monotime(NULL));
+	zlog_info("%s: adjin is %p", __func__, adjin);
+	if (adjin)
+		zlog_info("%s: adjin from peer %pBP rxid %"PRIu32" filtered=%d, reason=%s",
+			  __func__,
+			  adjin->peer,
+			  adjin->addpath_rx_id,
+			  adjin->filtered,
+			  bgp_inbound_filtered_reason_str(adjin->reason));
+
+
+	struct bmp_path_status path_status =
+		bmp_make_path_status_precomputed(
+			adjin && adjin->filtered ? bmp_path_status_filtered_in :
+					bmp_path_status_reserved,
+			bmp_path_status_get_reason(
+				bmp_make_bgp_reason_inbound(adjin)
+				)
+			);
+
+	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
+		    adjin ? adjin->attr : NULL, afi, safi, addpath_rx_id,
+		    adjin ? adjin->uptime : monotime(NULL), path_status);
 
 	written = true;
 
@@ -2085,7 +2381,8 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi,
-			    safi, addpath_tx_id, monotime(NULL));
+			    safi, addpath_tx_id, monotime(NULL),
+			    bmp_make_path_status(bpi, bn));
 
 		written = true;
 	}
@@ -2108,7 +2405,9 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
-			    advertised_attr, afi, safi, addpath_tx_id, monotime(NULL));
+			    advertised_attr, afi, safi, addpath_tx_id,
+			    monotime(NULL),
+			    bmp_make_path_status(adj && adj->adv && adj->adv->pathi ? adj->adv->pathi : NULL, bn));
 
 		written = true;
 	}
@@ -2271,6 +2570,9 @@ static int bmp_process_ribinpre(struct bgp *bgp, afi_t afi, safi_t safi,
 			    bpi->addpath_rx_id == addpath_id)
 				SET_FLAG(bpi->flags, BGP_PATH_BMP_ADJIN_CHG);
 	}
+
+	zlog_info("%s: for afi/safi %s dest %pRN addpath_id %"PRIu32" peer %pBP post %d",
+		  __func__, get_afi_safi_str(afi, safi, false), bn, addpath_id, peer, post);
 
 	frr_each(bmp_targets, &bmpbgp->targets, bt) {
 		if (!CHECK_FLAG(bt->afimon[afi][safi], BMP_MON_IN_PREPOLICY))

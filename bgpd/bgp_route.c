@@ -4057,7 +4057,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	struct bgp_path_info *pi;
 	struct bgp_path_info *new = NULL;
 	struct bgp_path_info_extra *extra;
-	const char *reason;
+	enum bgp_inbound_filtered_reason reason = bgp_inbound_filtered_none;
 	char pfx_buf[BGP_PRD_PATH_STRLEN];
 	int connected = 0;
 	int do_loop_check = 1;
@@ -4092,6 +4092,18 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	bgp = peer->bgp;
 	dest = bgp_afi_node_get(bgp->rib[afi][safi], afi, safi, p, prd);
+	zlog_info("%s node get for %pFX is %p %pRN prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, p, dest, dest, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
+	{
+		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
+		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
+		if (test) bgp_dest_unlock_node(test);
+	}
+	{
+		struct bgp_dest *test = bgp_afi_node_get(bgp->rib[afi][safi], afi, safi, p, prd);
+		zlog_info("%s: test get %p %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
+		if (test) bgp_dest_unlock_node(test);
+	}
+
 	/* TODO: Check to see if we can get rid of "is_valid_label" */
 	if (afi == AFI_L2VPN && safi == SAFI_EVPN)
 		has_valid_label = (num_labels > 0) ? 1 : 0;
@@ -4108,10 +4120,15 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* When peer's soft reconfiguration enabled.  Record input packet in
 	   Adj-RIBs-In.  */
+	struct bgp_adj_in *adj_in = NULL;
 	if (!soft_reconfig
 	    && CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
-	    && peer != bgp->peer_self)
-		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id);
+	    && peer != bgp->peer_self) {
+		adj_in =
+			bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id);
+		adj_in->filtered = false;
+		adj_in->reason = bgp_inbound_filtered_none;
+	}
 
 	/* Update permitted loop count */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_ALLOWAS_IN))
@@ -4135,7 +4152,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		if (aspath_loop_check(attr->aspath, peer->change_local_as)
 		    > aspath_loop_count) {
 			peer->stat_pfx_aspath_loop++;
-			reason = "as-path contains our own AS;";
+			reason = bgp_inbound_filtered_local_as_path_loop;
 			goto filtered;
 		}
 	}
@@ -4158,7 +4175,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		if (aspath_loop_check(attr->aspath, bgp->as) >
 		    peer->allowas_in[afi][safi]) {
 			peer->stat_pfx_aspath_loop++;
-			reason = "as-path contains our own AS;";
+			reason = bgp_inbound_filtered_as_path_loop;
 			goto filtered;
 		}
 	}
@@ -4168,7 +4185,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		if (aspath_loop_check_confed(attr->aspath, bgp->confed_id) >
 		    peer->allowas_in[afi][safi]) {
 			peer->stat_pfx_aspath_loop++;
-			reason = "as-path contains our own confed AS;";
+			reason = bgp_inbound_filtered_confed_loop;
 			goto filtered;
 		}
 
@@ -4183,7 +4200,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			bgp_accept_own(peer, afi, safi, attr, p, &sub_type);
 		if (!accept_own) {
 			peer->stat_pfx_originator_loop++;
-			reason = "originator is us;";
+			reason = bgp_inbound_filtered_self_originated;
 			goto filtered;
 		}
 	}
@@ -4191,14 +4208,14 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	/* Route reflector cluster ID check.  */
 	if (bgp_cluster_filter(peer, attr)) {
 		peer->stat_pfx_cluster_loop++;
-		reason = "reflected from the same cluster;";
+		reason = bgp_inbound_filtered_RR_loop;
 		goto filtered;
 	}
 
 	/* Apply incoming filter.  */
 	if (bgp_input_filter(peer, p, attr, afi, orig_safi) == FILTER_DENY) {
 		peer->stat_pfx_filter++;
-		reason = "filter;";
+		reason = bgp_inbound_filtered_filter_policy;
 		goto filtered;
 	}
 
@@ -4214,7 +4231,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (CHECK_FLAG(bgp->flags, BGP_FLAG_EBGP_REQUIRES_POLICY))
 		if (!bgp_inbound_policy_exists(peer,
 					       &peer->filter[afi][safi])) {
-			reason = "inbound policy missing";
+			reason = bgp_inbound_filtered_ebgp_requires_policy;
 			if (monotime_since(&bgp->ebgprequirespolicywarning,
 					   NULL) > FIFTEENMINUTE2USEC ||
 			    bgp->ebgprequirespolicywarning.tv_sec == 0) {
@@ -4233,8 +4250,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	 */
 	if (peer->bgp->reject_as_sets)
 		if (aspath_check_as_sets(attr->aspath)) {
-			reason =
-				"as-path contains AS_SET or AS_CONFED_SET type;";
+			reason = bgp_inbound_filtered_reject_as_sets;
 			goto filtered;
 		}
 
@@ -4250,7 +4266,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			       num_labels, dest)
 	    == RMAP_DENY) {
 		peer->stat_pfx_filter++;
-		reason = "route-map;";
+		reason = bgp_inbound_filtered_routemap_policy;
 		bgp_attr_flush(&new_attr);
 		goto filtered;
 	}
@@ -4298,21 +4314,21 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	    bgp_update_martian_nexthop(bgp, afi, safi, type, sub_type,
 				       &new_attr, dest)) {
 		peer->stat_pfx_nh_invalid++;
-		reason = "martian or self next-hop;";
+		reason = bgp_inbound_filtered_nhs_or_martian;
 		bgp_attr_flush(&new_attr);
 		goto filtered;
 	}
 
 	if (bgp_mac_entry_exists(p) || bgp_mac_exist(&attr->rmac)) {
 		peer->stat_pfx_nh_invalid++;
-		reason = "self mac;";
+		reason = bgp_inbound_filtered_nhs_mac;
 		bgp_attr_flush(&new_attr);
 		goto filtered;
 	}
 
 	if (bgp_check_role_applicability(afi, safi) &&
 	    bgp_otc_filter(peer, &new_attr)) {
-		reason = "failing otc validation";
+		reason = bgp_inbound_filtered_otc;
 		bgp_attr_flush(&new_attr);
 		goto filtered;
 	}
@@ -4847,7 +4863,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	 * count exeed it.
 	 */
 	if (bgp_maximum_prefix_overflow(peer, afi, safi, 0)) {
-		reason = "maximum-prefix overflow";
+		reason = bgp_inbound_filtered_maximum_prefix_overflow;
 		bgp_attr_flush(&new_attr);
 		goto filtered;
 	}
@@ -4930,7 +4946,19 @@ filtered:
 		XFREE(MTYPE_BGP_ROUTE, new);
 	}
 
+	zlog_info("%s: set adjin %p filtered true reason %s", __func__, adj_in, bgp_inbound_filtered_reason_str(reason));
+	if (adj_in) {
+		adj_in->filtered = true;
+		adj_in->reason = reason;
+	}
+
 	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
+
+	{
+		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
+		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
+		if (test) bgp_dest_unlock_node(test);
+	}
 
 	if (bgp_debug_update(peer, p, NULL, 1)) {
 		if (!peer->rcvd_attr_printed) {
@@ -4943,7 +4971,8 @@ filtered:
 					addpath_id ? 1 : 0, addpath_id, evpn,
 					pfx_buf, sizeof(pfx_buf));
 		zlog_debug("%pBP rcvd UPDATE about %s -- DENIED due to: %s",
-			   peer, pfx_buf, reason);
+			   peer, pfx_buf,
+			   bgp_inbound_filtered_reason_str(reason));
 	}
 
 	if (pi) {
@@ -4965,9 +4994,17 @@ filtered:
 		}
 
 		bgp_rib_remove(dest, pi, peer, afi, safi);
+		zlog_info("rib remove");
 	}
 
 	bgp_dest_unlock_node(dest);
+	zlog_info("unlock node: %d", dest->lock);
+
+	{
+		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
+		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
+		if (test) bgp_dest_unlock_node(test);
+	}
 
 #ifdef ENABLE_BGP_VNC
 	/*

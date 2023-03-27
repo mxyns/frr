@@ -36,6 +36,7 @@
 #define BMP_INFO_TYPE_ASN4_CAP		6
 #define BMP_INFO_TYPE_ADDPATH_CAP	7
 #define BMP_INFO_TYPE_MULTLBL_CAP	8
+#define BMP_INFO_TYPE_PATH_STATUS	9
 
 /* Packet Field Offsets */
 /* Offset of the Length field in the TLV */
