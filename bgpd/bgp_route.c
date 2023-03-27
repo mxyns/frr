@@ -5031,6 +5031,9 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 			}
 			bgp_dest_unlock_node(dest);
 			return;
+		} else {
+			hook_call(bgp_process, peer->bgp, afi, safi, dest,
+				  addpath_id, peer, false);
 		}
 
 	/* Lookup withdrawn route. */
