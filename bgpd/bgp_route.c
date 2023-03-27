@@ -2956,6 +2956,7 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	 */
 	advertise = bgp_check_advertise(bgp, dest);
 
+	zlog_info("advertise is true %d, flags are %"PRIu32"", advertise, selected ? selected->flags : 0);
 	bgp_adj_out_updated(subgrp, dest, selected, addpath_tx_id, &attr, false,
 			    selected && advertise ? false : true, __func__);
 
@@ -3264,6 +3265,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	 * set
 	 */
 	if (old_select || new_select) {
+		zlog_info("hook call new select %p ", new_select);
 		hook_call(bgp_route_update, bgp, afi, safi, dest, old_select,
 			  new_select);
 	}
@@ -3288,6 +3290,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 				   diff->update ? "+" : "-", diff);
 	}
 
+	zlog_info("before unchanged new select %p", new_select);
 	/* If best route remains the same and this is not due to user-initiated
 	 * clear, see exactly what needs to be done.
 	 */
@@ -3345,6 +3348,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		goto out;
 	}
 
+	zlog_info("after unchanged new select %p", new_select);
 	/* If the user did "clear ip bgp prefix x.x.x.x" this flag will be set
 	 */
 	UNSET_FLAG(dest->flags, BGP_NODE_USER_CLEAR);
@@ -3363,7 +3367,6 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 		}
 	}
 
-	/* TODO BMP insert rib update hook */
 	if (old_select)
 		bgp_path_info_unset_flag(dest, old_select, BGP_PATH_SELECTED);
 
@@ -3395,6 +3398,7 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	}
 #endif
 
+	zlog_info("before announce route %p", new_select);
 	group_announce_route(bgp, afi, safi, dest, new_select);
 
 	/* unicast routes must also be annouced to labeled-unicast update-groups
