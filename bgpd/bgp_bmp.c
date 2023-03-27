@@ -661,7 +661,7 @@ enum bmp_path_status_code {
 
 enum bmp_path_status_reason_code {
 
-	bmp_path_status_reason_reserved					= 0x0000,
+	bmp_path_status_reason_unkown = 0x0000,
 	bmp_path_status_reason_invalid_for_AS_loop			= 0x0006,
 	bmp_path_status_reason_invalid_for_unresolvable_nexthop        	= 0x0007,
 	bmp_path_status_reason_not_preferred_for_Local_preference      	= 0x0016,
@@ -706,19 +706,8 @@ bmp_make_bgp_reason_inbound(struct bgp_adj_in* adjin) {
 
 struct bmp_path_status {
 
-	bool precomputed;
-	union {
-		struct {
-			enum bmp_path_status_code status_code;
-			enum bmp_path_status_reason_code reason_code;
-		};
-
-		struct {
-			uint32_t bpi_flags;
-			uint16_t dest_flags;
-			struct bgp_reason reason;
-		};
-	};
+	enum bmp_path_status_code status_code;
+	enum bmp_path_status_reason_code reason_code;
 };
 
 static enum bmp_path_status_code bmp_path_status_get_status(uint32_t bpi_flags, uint16_t dest_flags) {
@@ -728,29 +717,23 @@ static enum bmp_path_status_code bmp_path_status_get_status(uint32_t bpi_flags, 
 	if (!CHECK_FLAG(bpi_flags, BGP_PATH_VALID))
 		status |= bmp_path_status_invalid;
 
-	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
-		status |= bmp_path_status_best;
-	else
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED))
+		status |= bmp_path_status_primary | bmp_path_status_best;
+
+	if (!CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
 		status |= bmp_path_status_non_selected;
 
 	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH)
 	    && CHECK_FLAG(dest_flags, BGP_NODE_FIB_INSTALLED))
 		status |= bmp_path_status_non_installed;
 
-	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED))
-		status |= bmp_path_status_primary;
-
 	if (CHECK_FLAG(bpi_flags, BGP_PATH_MULTIPATH))
-		status |= bmp_path_status_backup | bmp_path_status_addpath;
-
+		status |= bmp_path_status_addpath;
 
 	// TODO
 	// 0x00000040 bmp_path_status_best_external (NEED IMPLEMENT)
-	// 0x00000080 bmp_path_status_addpath (NEED PRECISE DEFINITION)
-	// 0x00000100 bmp_path_status_filtered_in (WIP)
-	// 0x00000200 bmp_path_status_filtered_out (NEED IMPLEMENT)
 	// 0x00000400 bmp_path_status_invalid_rov (NO IDEA)
-
+	// 0x00000400 bmp_path_status_backup (NO IDEA)
 
 	return status;
 }
@@ -767,7 +750,7 @@ bmp_path_status_get_reason(struct bgp_reason reason)
 		goto filter_in_reason;
 	default:
 		zlog_warn("%s: Unknown path status reason type!", __func__);
-		return bmp_path_status_reason_reserved;
+		return bmp_path_status_reason_unkown;
 	}
 
 select_reason:
@@ -808,7 +791,7 @@ select_reason:
 	case bgp_path_selection_evpn_lower_ip:
 	case bgp_path_selection_accept_own:
 	default:
-		return bmp_path_status_reason_reserved;
+		return bmp_path_status_reason_unkown;
 	}
 
 filter_in_reason:
@@ -830,7 +813,7 @@ filter_in_reason:
 	case bgp_inbound_filtered_otc:
 	case bgp_inbound_filtered_maximum_prefix_overflow:
 	default:
-		return bmp_path_status_reason_reserved;
+		return bmp_path_status_reason_unkown;
 	}
 
 }
@@ -841,31 +824,46 @@ static inline struct bmp_path_status bmp_make_path_status(
 	struct bgp_dest *dest) {
 
 	return (struct bmp_path_status) {
-		.precomputed = false,
-		.bpi_flags = bpi ? bpi->flags : 0,
-		.dest_flags = dest ? dest->flags : 0,
-		.reason = bmp_make_bgp_reason_select(dest),
+		.status_code = bmp_path_status_get_status(bpi ? bpi->flags : 0,
+							  dest ? dest->flags : 0),
+		.reason_code = bmp_path_status_get_reason(
+			bmp_make_bgp_reason_select(dest)
+			),
 	};
 }
 
-static inline struct bmp_path_status bmp_make_path_status_precomputed(
+static inline struct bmp_path_status bmp_make_path_status_manual(
 	enum bmp_path_status_code status_code,
 	enum bmp_path_status_reason_code reason_code) {
 
 	return (struct bmp_path_status) {
-		.precomputed = true,
 		.status_code = status_code,
 		.reason_code = reason_code,
 	};
 }
 
-static inline struct bmp_path_status bmp_make_path_status_precomputed_adjin(
+static inline struct bmp_path_status bmp_make_path_status_adjin(
 	struct bgp_adj_in *adjin) {
 
-	return bmp_make_path_status_precomputed(
+	return bmp_make_path_status_manual(
 		adjin && adjin->filtered ? bmp_path_status_filtered_in
 					 : bmp_path_status_reserved,
 		bmp_path_status_get_reason(bmp_make_bgp_reason_inbound(adjin)));
+}
+
+static inline struct bmp_path_status bmp_make_path_status_adjout(
+	struct bgp_path_info *bpi,
+	struct bgp_dest *dest,
+	struct peer *dest_peer,
+	uint32_t addpath_tx_id) {
+
+	struct bmp_path_status path_status = bmp_make_path_status(bpi, dest);
+	if (dest && dest_peer
+	    && !bgp_adj_out_lookup(dest_peer, dest, addpath_tx_id))
+		path_status.status_code |=
+				 bmp_path_status_filtered_out;
+
+	return path_status;
 }
 
 static void bmp_put_info_tlv_path_status(struct stream *s, struct bmp_path_status status)
@@ -874,18 +872,9 @@ static void bmp_put_info_tlv_path_status(struct stream *s, struct bmp_path_statu
 	enum bmp_path_status_code status_code = status.status_code;
 	enum bmp_path_status_reason_code reason_code = status.reason_code;
 
-	if (!status.precomputed) {
-		zlog_info("%s: status not precomputed bpi_flags=%"PRIu32"  dest_flags=%"PRIu16, __func__, status.bpi_flags, status.dest_flags);
-		zlog_info("%s: reason: type=%d, code=%d", __func__, status.reason.type, status.reason.type == bgp_path_selection_reason ? status.reason.select_reason : status.reason.inbound_reason);
-		status_code = bmp_path_status_get_status(status.bpi_flags, status.dest_flags);
-		reason_code = bmp_path_status_get_reason(status.reason);
-	} else {
-		zlog_info("%s: status precomputed", __func__);
-	}
-
 	zlog_info("%s: status is status_code=%"PRIu32"  reason_code=%"PRIu16, __func__, status_code, reason_code);
 
-	bool include_reason = reason_code != bmp_path_status_reason_reserved;
+	bool include_reason = reason_code != bmp_path_status_reason_unkown;
 
 	bmp_put_info_tlv_hdr_with_index(s,
 		BMP_INFO_TYPE_PATH_STATUS | (E_bit ? (1 << 15) : 0),
@@ -1660,7 +1649,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp, vo
 				    &ctx->dest->p, ctx->prd, ctx->attr,
 				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
 				    addpath_tx_id, monotime(NULL),
-				    bmp_make_path_status(ctx->bpi, ctx->dest));
+				    bmp_make_path_status_adjout(ctx->bpi, ctx->dest, PAF_PEER(paf), addpath_tx_id));
 
 			*ctx->written_ref = true;
 		}
@@ -1971,7 +1960,7 @@ afibreak:
 		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
 			    bn_p, prd, adjin->attr, afi, safi,
 			    adjin->addpath_rx_id, adjin->uptime,
-			    bmp_make_path_status_precomputed_adjin(adjin));
+			    bmp_make_path_status_adjin(adjin));
 		written = true;
 	}
 
@@ -2288,7 +2277,7 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 		    adjin ? adjin->attr : NULL, afi, safi, addpath_rx_id,
 		    adjin ? adjin->uptime : monotime(NULL),
-		    bmp_make_path_status_precomputed_adjin(adjin));
+		    bmp_make_path_status_adjin(adjin));
 
 	written = true;
 
@@ -2361,11 +2350,12 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 				break;
 		}
 
+		zlog_info("%s using bpi %p", __func__, bpi);
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi,
 			    safi, addpath_tx_id, monotime(NULL),
-			    bmp_make_path_status(bpi, bn));
+			    bmp_make_path_status_adjout(bpi, !bn && bpi ? bpi->net : bn, peer, addpath_tx_id));
 
 		written = true;
 	}
