@@ -1968,18 +1968,10 @@ afibreak:
 	bool written = false;
 
 	if (adjin) {
-		struct bmp_path_status path_status =
-			bmp_make_path_status_precomputed(
-				adjin->filtered ? bmp_path_status_filtered_in :
-						bmp_path_status_reserved,
-				bmp_path_status_get_reason(
-					bmp_make_bgp_reason_inbound(adjin)
-						)
-			);
-
 		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
 			    bn_p, prd, adjin->attr, afi, safi,
-			    adjin->addpath_rx_id, adjin->uptime, path_status);
+			    adjin->addpath_rx_id, adjin->uptime,
+			    bmp_make_path_status_precomputed_adjin(adjin));
 		written = true;
 	}
 
@@ -2293,19 +2285,10 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 			  adjin->filtered,
 			  bgp_inbound_filtered_reason_str(adjin->reason));
 
-
-	struct bmp_path_status path_status =
-		bmp_make_path_status_precomputed(
-			adjin && adjin->filtered ? bmp_path_status_filtered_in :
-					bmp_path_status_reserved,
-			bmp_path_status_get_reason(
-				bmp_make_bgp_reason_inbound(adjin)
-				)
-			);
-
 	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 		    adjin ? adjin->attr : NULL, afi, safi, addpath_rx_id,
-		    adjin ? adjin->uptime : monotime(NULL), path_status);
+		    adjin ? adjin->uptime : monotime(NULL),
+		    bmp_make_path_status_precomputed_adjin(adjin));
 
 	written = true;
 
