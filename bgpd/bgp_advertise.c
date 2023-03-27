@@ -25,6 +25,44 @@
 #include "bgpd/bgp_mplsvpn.h"
 #include "bgpd/bgp_updgrp.h"
 
+
+const char *bgp_inbound_filtered_reason_str(enum bgp_inbound_filtered_reason reason) {
+
+	switch(reason) {
+	case bgp_inbound_filtered_none:
+		return "not filtered;";
+	case bgp_inbound_filtered_local_as_path_loop:
+		return "as-path with local-as contains our own AS;";
+	case bgp_inbound_filtered_as_path_loop:
+		return "as-path contains our own AS;";
+	case bgp_inbound_filtered_confed_loop:
+		return "as-path contains our own confed AS;";
+	case bgp_inbound_filtered_self_originated:
+		return "originator is us;";
+	case bgp_inbound_filtered_RR_loop:
+		return "reflected from the same cluster;";
+	case bgp_inbound_filtered_filter_policy:
+		return "filter;";
+	case bgp_inbound_filtered_ebgp_requires_policy:
+		return "inbound policy missing";
+	case bgp_inbound_filtered_reject_as_sets:
+		return "as-path contains AS_SET or AS_CONFED_SET type;";
+	case bgp_inbound_filtered_routemap_policy:
+		return "route-map;";
+	case bgp_inbound_filtered_nhs_or_martian:
+		return "martian or self next-hop;";
+	case bgp_inbound_filtered_nhs_mac:
+		return "self mac;";
+	case bgp_inbound_filtered_otc:
+		return "failing otc validation";
+	case bgp_inbound_filtered_maximum_prefix_overflow:
+		return "maximum-prefix overflow";
+	default:
+		/* should never happen */
+		return NULL;
+	}
+}
+
 /* BGP advertise attribute is used for pack same attribute update into
    one packet.  To do that we maintain attribute hash in struct
    peer.  */
@@ -165,7 +203,7 @@ bool bgp_adj_out_lookup(struct peer *peer, struct bgp_dest *dest,
 }
 
 
-void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
+struct bgp_adj_in *bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 		    struct peer *peer, struct attr *attr, uint32_t addpath_id)
 {
 	struct bgp_adj_in *adj;
@@ -176,7 +214,7 @@ void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 				bgp_attr_unintern(&adj->attr);
 				adj->attr = bgp_attr_intern(attr);
 			}
-			return;
+			return adj;
 		}
 	}
 	adj = XCALLOC(MTYPE_BGP_ADJ_IN, sizeof(struct bgp_adj_in));
@@ -185,8 +223,12 @@ void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 	adj->attr = bgp_attr_intern(attr);
 	adj->uptime = monotime(NULL);
 	adj->addpath_rx_id = addpath_id;
+	adj->filtered = false;
+	adj->reason = bgp_inbound_filtered_none;
 	BGP_ADJ_IN_ADD(dest, adj);
 	bgp_dest_lock_node(dest);
+
+	return adj;
 }
 
 void bgp_adj_in_remove(struct bgp_dest *dest, afi_t afi, safi_t safi,
