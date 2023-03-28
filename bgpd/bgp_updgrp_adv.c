@@ -454,6 +454,11 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 			 struct attr *attr, bool post_policy, bool withdraw,
 			 const char *caller)
 {
+	if (path && !withdraw && CHECK_FLAG(path->flags, BGP_PATH_REMOVED)) {
+		/* path is removed, enforcing withdraw state */
+		withdraw = true;
+	}
+
 	hook_call(bgp_adj_out_updated, subgrp, dest, path, addpath_tx, attr,
 		  post_policy, withdraw);
 }
