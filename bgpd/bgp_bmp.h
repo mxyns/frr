@@ -63,7 +63,6 @@ struct bmp_queue_entry {
 	struct bmp_qlist_item bli;
 	struct bmp_qhash_item bhi;
 
-	struct bgp_path_info *locked_bpi;
 	uint32_t addpath_id;
 
 #define BMP_QUEUE_FLAGS_NONE (0 << 0)

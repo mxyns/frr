@@ -143,7 +143,7 @@ static int bmp_bpi_lock_cmp(const struct bmp_bpi_lock *a,
 static uint32_t bmp_bpi_lock_hash(const struct bmp_bpi_lock *e)
 {
 	uint32_t key = prefix_hash_key(&e->dest->p);
-	key = jhash(e->bgp, sizeof(*e->bgp), key);
+	key = jhash(&e->bgp, sizeof(e->bgp), key);
 
 	return key;
 }
@@ -238,9 +238,6 @@ static inline void bmp_bqe_free(struct bmp_queue_entry *bqe, struct bgp *bgp)
 
 	if (!bqe)
 		return;
-
-	if (bqe->locked_bpi)
-		bmp_unlock_bpi(bgp, bqe->locked_bpi);
 
 	XFREE(MTYPE_BMP_QUEUE, bqe);
 }
@@ -1924,27 +1921,23 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		       BMP_MON_OUT_PREPOLICY) &&
 	    CHECK_FLAG(bqe->flags, BMP_MON_OUT_PREPOLICY)) {
 
-		struct bgp_path_info *bpi = bqe->locked_bpi;
+		struct bgp_path_info *bpi;
+		for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
+		     bpi = bpi->next) {
+			if (addpath_tx_id !=
+			    bgp_addpath_id_for_peer(peer, afi, safi,
+						    &bpi->tx_addpath))
+				continue;
 
-		if (!bpi) {
-			for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL;
-			     bpi; bpi = bpi->next) {
-				if (addpath_tx_id !=
-				    bgp_addpath_id_for_peer(peer, afi, safi,
-							    &bpi->tx_addpath))
-					continue;
-
-				if (CHECK_FLAG(bpi->flags,
-					       BGP_PATH_SELECTED |
-						       BGP_PATH_MULTIPATH))
-					break;
-			}
+			if (CHECK_FLAG(bpi->flags,
+				       BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
+				break;
 		}
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
-			    !bqe->locked_bpi && bpi ? bpi->attr : NULL, afi,
-			    safi, addpath_tx_id, monotime(NULL));
+			    bpi ? bpi->attr : NULL, afi, safi, addpath_tx_id,
+			    monotime(NULL));
 
 		written = true;
 	}
@@ -2064,7 +2057,6 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 	bqeref.afi = afi;
 	bqeref.safi = safi;
 	bqeref.flags = mon_flag;
-	bqeref.locked_bpi = lock_bpi;
 	bqeref.addpath_id = addpath_id;
 
 	if ((afi == AFI_L2VPN && safi == SAFI_EVPN && bn->pdest) ||
@@ -2075,12 +2067,6 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 	bqe = bmp_qhash_find(updhash, &bqeref);
 	if (bqe) {
 		SET_FLAG(bqe->flags, mon_flag);
-		/* swap locked bpis and un/lock pre/new bpis */
-		if (lock_bpi && lock_bpi == bqe->locked_bpi) {
-			bmp_lock_bpi(bt->bgp, lock_bpi);
-			bmp_unlock_bpi(bt->bgp, bqe->locked_bpi);
-			bqe->locked_bpi = lock_bpi;
-		}
 
 		if (bqe->refcount >= refcount) {
 			/* same update, not sent to anyone yet,
@@ -2094,9 +2080,6 @@ bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
 		memcpy(bqe, &bqeref, sizeof(*bqe));
 
 		bmp_qhash_add(updhash, bqe);
-
-		if (lock_bpi)
-			bmp_lock_bpi(bt->bgp, lock_bpi);
 	}
 
 	bqe->refcount = refcount;
@@ -3778,7 +3761,7 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 						addpath_id);
 
 				if (!lbpi) {
-					zlog_info(
+					zlog_warn(
 						"no locked path found for %pRN tx %" PRIu32,
 						dest, addpath_id);
 					return 0;
