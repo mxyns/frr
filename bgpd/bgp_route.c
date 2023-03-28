@@ -5016,7 +5016,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	 * if there was no entry, we don't need to do anything more.
 	 */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
-	    && peer != bgp->peer_self)
+	    && peer != bgp->peer_self) {
 		if (!bgp_adj_in_unset(dest, afi, safi, peer, addpath_id)) {
 			peer->stat_pfx_dup_withdraw++;
 
@@ -5035,6 +5035,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 			hook_call(bgp_process, peer->bgp, afi, safi, dest,
 				  addpath_id, peer, false);
 		}
+	}
 
 	/* Lookup withdrawn route. */
 	for (pi = bgp_dest_get_bgp_path_info(dest); pi; pi = pi->next)

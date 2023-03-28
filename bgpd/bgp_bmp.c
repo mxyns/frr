@@ -3475,7 +3475,7 @@ static void bmp_show_locked(struct vty *vty) {
 
 			vty_out(vty, " [#%d][lock=%d] %s: bgp id=%"PRId64" dest=%pRN rx_id=%"PRIu32" from peer=%pBP\n",
 				n, lbpi_curr->lock, n == 0 ? "head" : "node",
-				lbpi_curr->bgp ? (uint64_t)lbpi_curr->bgp->vrf_id : -1,
+				lbpi_curr->bgp ? (int64_t)lbpi_curr->bgp->vrf_id : -1,
 				lbpi_curr->locked->net,
 				lbpi_curr->locked->addpath_rx_id,
 				lbpi_curr->locked->peer);
