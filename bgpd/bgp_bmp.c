@@ -720,15 +720,16 @@ static enum bmp_path_status_code bmp_path_status_get_status(uint32_t bpi_flags, 
 	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED))
 		status |= bmp_path_status_primary | bmp_path_status_best;
 
+	if (CHECK_FLAG(bpi_flags, BGP_PATH_MULTIPATH))
+		status |= bmp_path_status_addpath | bmp_path_status_primary;
+
 	if (!CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
 		status |= bmp_path_status_non_selected;
 
-	if (CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH)
-	    && CHECK_FLAG(dest_flags, BGP_NODE_FIB_INSTALLED))
+	if (!(CHECK_FLAG(bpi_flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH)
+	    && CHECK_FLAG(dest_flags, BGP_NODE_FIB_INSTALLED)))
 		status |= bmp_path_status_non_installed;
 
-	if (CHECK_FLAG(bpi_flags, BGP_PATH_MULTIPATH))
-		status |= bmp_path_status_addpath;
 
 	// TODO
 	// 0x00000040 bmp_path_status_best_external (NEED IMPLEMENT)
