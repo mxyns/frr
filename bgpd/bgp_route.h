@@ -831,6 +831,7 @@ extern void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 					       struct bgp_dest *dest,
 					       uint32_t addpath_tx_id);
 
+/* used by bmp to ignore certain conditions in rib-out pre-policy check */
 #define BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY (1 << 0)
 #define BGP_ANNCHK_SPECIAL_IGNORE_PATH_STATUS (1 << 1)
 #define BGP_ANNCHK_SPECIAL_PREPOLICY (BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY \

@@ -449,6 +449,7 @@ bgp_advertise_clean_subgroup(struct update_subgroup *subgrp,
 	return next;
 }
 
+/* call the bgp_adj_out_updated hook for bmp rib-out monitoring */
 void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 			 struct bgp_path_info *path, uint32_t addpath_tx,
 			 struct attr *attr, bool post_policy, bool withdraw,

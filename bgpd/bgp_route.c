@@ -1998,6 +1998,8 @@ bool subgroup_announce_check(struct bgp_dest *dest, struct bgp_path_info *pi,
 	bgp = SUBGRP_INST(subgrp);
 	piattr = bgp_path_info_mpath_count(pi) ? bgp_path_info_mpath_attr(pi)
 					       : pi->attr;
+
+	/* special conditions for bmp rib-out pre-policy check */
 	bool ignore_policy = CHECK_FLAG(special_cond,
 					BGP_ANNCHK_SPECIAL_IGNORE_OUT_POLICY);
 	bool ignore_path_status = CHECK_FLAG(special_cond,
