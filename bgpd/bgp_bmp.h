@@ -363,6 +363,7 @@ struct bmp_bgp {
 	size_t mirror_qsizelimit;
 
 	uint32_t startup_delay_ms;
+	bool peer_loc;
 };
 
 enum {
