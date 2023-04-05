@@ -662,10 +662,11 @@ inline static void bmp_put_info_tlv_capability(struct stream *s, uint16_t type) 
 /* add a GROUP TLV containing reference to 'count' NLRIs for found in 'indices'
  */
 __attribute__((__unused__))
-inline static void bmp_put_info_tlv_group(struct stream *s, uint16_t *indices, int count) {
+inline static void bmp_put_info_tlv_group(struct stream *s, uint16_t group_id, uint16_t *indices, int count) {
 
 	bmp_put_info_tlv_hdr_with_index(s, BMP_INFO_TYPE_GROUP,
-			     count * BMP_INFO_LENGTH_GROUP_ITEM_SIZE, 0);
+			     (count + 1) * BMP_INFO_LENGTH_GROUP_ITEM_SIZE, 0);
+	stream_putw(s, group_id);
 	stream_put(s, indices, count * sizeof(*indices));
 }
 
