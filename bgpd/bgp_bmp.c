@@ -40,6 +40,7 @@
 #include "bgpd/bgp_trace.h"
 #include "bgpd/bgp_network.h"
 #include "bgp_addpath.h"
+#include "bgp_rd.h"
 
 static void bmp_close(struct bmp *bmp);
 static struct bmp_bgp *bmp_bgp_find(struct bgp *bgp);
@@ -1142,7 +1143,9 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
  */
 static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 				 uint32_t addpath_id, struct peer *peer,
-				 struct attr *attr, afi_t afi, safi_t safi)
+				 struct attr *attr, afi_t afi, safi_t safi,
+				 mpls_label_t *label_stack,
+				 uint32_t label_count)
 {
 	struct bpacket_attr_vec_arr vecarr;
 	struct stream *s;
@@ -1162,9 +1165,10 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 	stream_putw(s, 0);
 
 	/* 5: Encode all the attributes, except MP_REACH_NLRI attr. */
-	total_attr_len = bgp_packet_attribute(NULL, peer, s, attr, &vecarr,
-					      NULL, afi, safi, peer, NULL, NULL,
-					      0, 1, addpath_id, NULL);
+	total_attr_len =
+		bgp_packet_attribute(NULL, peer, s, attr, &vecarr, NULL, afi,
+				     safi, peer, NULL, label_stack, label_count,
+				     safi != SAFI_MPLS_VPN, addpath_id, NULL);
 
 	/* space check? */
 
@@ -1178,7 +1182,8 @@ static struct stream *bmp_update(const struct prefix *p, struct prefix_rd *prd,
 
 		mpattrlen_pos = bgp_packet_mpattr_start(s, peer, afi, safi,
 				&vecarr, attr);
-		bgp_packet_mpattr_prefix(s, afi, safi, p, prd, NULL, 0, 1,
+		bgp_packet_mpattr_prefix(s, afi, safi, p, prd, label_stack,
+					 label_count, safi != SAFI_MPLS_VPN,
 					 addpath_id, attr);
 		bgp_packet_mpattr_end(s, mpattrlen_pos);
 		total_attr_len += stream_get_endp(s) - p1;
@@ -1240,7 +1245,8 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 			uint8_t peer_type_flag, const struct prefix *p,
 			struct prefix_rd *prd, struct attr *attr, afi_t afi,
-			safi_t safi, uint32_t addpath_id, time_t uptime)
+			safi_t safi, uint32_t addpath_id, time_t uptime,
+			struct bgp_path_info *bpi)
 {
 	struct stream *hdr, *msg;
 	struct timeval tv = { .tv_sec = uptime, .tv_usec = 0 };
@@ -1256,9 +1262,17 @@ static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
 	}
 
 	monotime_to_realtime(&tv, &uptime_real);
-	if (attr)
-		msg = bmp_update(p, prd, addpath_id, peer, attr, afi, safi);
-	else
+	if (attr) {
+		mpls_label_t *label_stack = NULL;
+		uint32_t label_count = 0;
+		if (bpi && bpi->extra && bpi->extra->num_labels) {
+			label_count = bpi->extra->num_labels;
+			label_stack = bpi->extra->label;
+		}
+
+		msg = bmp_update(p, prd, addpath_id, peer, attr, afi, safi,
+				 label_stack, label_count);
+	} else
 		msg = bmp_withdraw(p, prd, addpath_id, afi, safi);
 
 	hdr = stream_new(BGP_MAX_PACKET_SIZE);
@@ -1304,6 +1318,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 	UPDGRP_FOREACH_SUBGRP (updgrp, subgrp) {
 
 		struct attr dummy_attr = {0};
+
 		if (!subgroup_announce_check(ctx->dest, ctx->bpi, subgrp,
 					     ctx->pfx, &dummy_attr, NULL,
 					     BGP_ANNCHK_SPECIAL_PREPOLICY))
@@ -1323,7 +1338,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE,
 				    &ctx->dest->p, ctx->prd, ctx->attr,
 				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id, monotime(NULL));
+				    addpath_tx_id, monotime(NULL), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -1406,7 +1421,7 @@ static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp,
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE, ctx->pfx,
 				    ctx->prd, advertised_attr,
 				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id, monotime(NULL));
+				    addpath_tx_id, monotime(NULL), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -1637,7 +1652,7 @@ afibreak:
 	if (adjin) {
 		bmp_monitor(bmp, adjin->peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE,
 			    bn_p, prd, adjin->attr, afi, safi,
-			    adjin->addpath_rx_id, adjin->uptime);
+			    adjin->addpath_rx_id, adjin->uptime, NULL);
 		written = true;
 	}
 
@@ -1647,7 +1662,7 @@ afibreak:
 	    CHECK_FLAG(mon_flags, BMP_MON_IN_POSTPOLICY)) {
 		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, bn_p, prd, bpi->attr,
-			    afi, safi, bpi->addpath_rx_id, bpi->uptime);
+			    afi, safi, bpi->addpath_rx_id, bpi->uptime, bpi);
 
 		UNSET_FLAG(bpi->flags, BGP_PATH_BMP_ADJIN_CHG);
 		written = true;
@@ -1661,7 +1676,8 @@ afibreak:
 		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    bn_p, prd, bpi->attr, afi, safi, bpi->addpath_rx_id,
 			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
-					      : (time_t)(-1L));
+					      : (time_t)(-1L),
+			    bpi);
 		written = true;
 	}
 
@@ -1841,7 +1857,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 			bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
 				    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 				    bpi->attr, afi, safi, addpath_rx_id,
-				    bpi->uptime);
+				    bpi->uptime, bpi);
 			ribin = bpi;
 			written = true;
 		}
@@ -1855,7 +1871,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 				    BMP_PEER_TYPE_LOC_RIB_INSTANCE, &bqe->p,
 				    prd, bpi->attr, afi, safi, addpath_rx_id,
 				    bpi->extra ? bpi->extra->bgp_rib_uptime
-					       : (time_t)(-1L));
+					       : (time_t)(-1L),
+				    bpi);
 			locrib = bpi;
 			written = true;
 		}
@@ -1869,7 +1886,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	if (CHECK_FLAG(flags, BMP_MON_IN_POSTPOLICY) && !ribin) {
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd, NULL,
-			    afi, safi, addpath_rx_id, (time_t)(-1));
+			    afi, safi, addpath_rx_id, (time_t)(-1), NULL);
 		written = true;
 	}
 
@@ -1877,7 +1894,7 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 	if (CHECK_FLAG(flags, BMP_MON_LOC_RIB) && !locrib) {
 		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
 			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
-			    (time_t)(-1L));
+			    (time_t)(-1L), NULL);
 		written = true;
 	}
 
@@ -1946,7 +1963,7 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 
 	bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 		    adjin ? adjin->attr : NULL, afi, safi, addpath_rx_id,
-		    adjin ? adjin->uptime : monotime(NULL));
+		    adjin ? adjin->uptime : monotime(NULL), NULL);
 
 	written = true;
 
@@ -2023,7 +2040,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    bpi ? bpi->attr : NULL, afi, safi, addpath_tx_id,
-			    monotime(NULL));
+			    monotime(NULL), bpi);
 
 		written = true;
 	}
@@ -2047,7 +2064,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
 			    BMP_PEER_TYPE_GLOBAL_INSTANCE, &bqe->p, prd,
 			    advertised_attr, afi, safi, addpath_tx_id,
-			    monotime(NULL));
+			    monotime(NULL), NULL);
 
 		written = true;
 	}
@@ -3768,6 +3785,10 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 	struct bmp_bgp *bmpbgp = bmp_bgp_get(bgp);
 	struct bmp_targets *bt;
 	struct bmp *bmp;
+
+	zlog_info("%s: bgp id=%d, afi safi=%s, bn=%pRN, old=%p, new=%p",
+		  __func__, (int)bgp->vrf_id,
+		  get_afi_safi_str(afi, safi, false), bn, old_route, new_route);
 
 	/* lock the bpi in case of withdraw for rib-out pre-policy
 	 * do this unconditionally because bmp_path_unlock hook will always be
