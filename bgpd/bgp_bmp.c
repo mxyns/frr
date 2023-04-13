@@ -811,8 +811,13 @@ struct bmp_path_status {
 static enum bmp_path_status_code bmp_path_status_get_status(struct bgp_path_info *bpi, struct bgp_node *dest, afi_t afi, safi_t safi) {
 
 	enum bmp_path_status_code status = bmp_path_status_reserved;
-	uint32_t bpi_flags = bpi ? bpi->flags : 0;
-	uint16_t dest_flags = dest ? dest->flags : 0;
+
+	if (!bpi || !dest)
+		return status;
+
+	uint32_t bpi_flags = bpi->flags;
+	uint16_t dest_flags = dest->flags;
+
 
 	if (!CHECK_FLAG(bpi_flags, BGP_PATH_VALID))
 		SET_FLAG(status, bmp_path_status_invalid);
@@ -985,14 +990,14 @@ bmp_make_path_status_adjin(struct bgp_adj_in *adjin, afi_t afi, safi_t safi)
 		bmp_path_status_get_reason(bmp_make_bgp_reason_inbound(adjin)));
 }
 
-/* make a path status structure for an adj-rib-out route
+/* make a path status structure for an adj-rib-out pre-policy route
  *
  * uses bpi and dest for the path status and reason
  * uses dest, dest_peer and addpath_tx_id to determine if outbound filtered
  * uses dest_peer afi, safi, to determine if addpath is used
  */
 static inline struct bmp_path_status
-bmp_make_path_status_adjout(struct bgp_path_info *bpi, struct bgp_dest *dest,
+bmp_make_path_status_adjout_pre(struct bgp_path_info *bpi, struct bgp_dest *dest,
 			    struct peer *dest_peer, uint32_t addpath_tx_id,
 			    afi_t afi, safi_t safi)
 {
@@ -1007,6 +1012,51 @@ bmp_make_path_status_adjout(struct bgp_path_info *bpi, struct bgp_dest *dest,
 	UNSET_FLAG(path_status.status_code, bmp_path_status_addpath);
 	if (dest_peer && bgp_addpath_encode_tx(dest_peer, afi, safi))
 		SET_FLAG(path_status.status_code, bmp_path_status_addpath);
+
+	return path_status;
+}
+
+/* make a path status structure for an adj-rib-out post-policy route
+ *
+ * uses bpi and dest for the path status and reason
+ * uses dest, dest_peer and addpath_tx_id to determine if outbound filtered
+ * uses dest_peer afi, safi, to determine if addpath is used
+ */
+static inline struct bmp_path_status
+bmp_make_path_status_adjout_post(struct bgp_adj_out *adj,
+				 struct bgp_path_info *bpi,
+				 struct peer *dest_peer,
+				 afi_t afi, safi_t safi)
+{
+	struct bmp_path_status path_status = {
+		.status_code = bmp_path_status_reserved,
+		.reason_code = bmp_path_status_reason_unkown
+	};
+
+	/* if no adj is given the path has been withdrawn and has no status */
+	if (!adj)
+		return path_status;
+
+	if (!bpi) {
+		zlog_info("i had to lookup...");
+		for (bpi=bgp_dest_get_bgp_path_info(adj->dest);
+		     bpi; bpi=bpi->next) {
+			if (bgp_addpath_id_for_peer(dest_peer, afi, safi,
+						    &bpi->tx_addpath)
+			    == adj->addpath_tx_id)
+				break;
+		}
+	}
+
+	struct bgp_dest *dest = adj ? adj->dest : NULL;
+	path_status = bmp_make_path_status(bpi, dest, afi, safi);
+
+	UNSET_FLAG(path_status.status_code, bmp_path_status_addpath);
+	if (dest_peer && bgp_addpath_encode_tx(dest_peer, afi, safi))
+		SET_FLAG(path_status.status_code, bmp_path_status_addpath);
+
+	if (!bpi || !dest)
+		zlog_info("bmp adj out missing path bpi=%p dest=%pRN", bpi, dest);
 
 	return path_status;
 }
@@ -1885,7 +1935,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 				    bmp_get_peer_type(peer), &ctx->dest->p,
 				    ctx->prd, ctx->attr, afi, safi,
 				    addpath_tx_id, (time_t)(-1L), ctx->bpi,
-				    bmp_make_path_status_adjout(
+				    bmp_make_path_status_adjout_pre(
 					    ctx->bpi, ctx->dest, peer,
 					    addpath_tx_id, afi, safi));
 
@@ -1974,8 +2024,8 @@ static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp,
 				    bmp_get_peer_type(peer), ctx->pfx, ctx->prd,
 				    advertised_attr, afi, safi, addpath_tx_id,
 				    (time_t)(-1L), ctx->bpi,
-				    bmp_make_path_status(ctx->bpi, ctx->dest,
-							 afi, safi));
+				    bmp_make_path_status_adjout_post(
+					    adj, ctx->bpi, peer, afi, safi));
 
 			*ctx->written_ref = true;
 		}
@@ -2582,28 +2632,26 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
 				  &bqe->p, prd);
 
+	/* lookup path in rib */
+	struct bgp_path_info *bpi;
+	for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
+	     bpi = bpi->next) {
+		if (addpath_tx_id != bgp_addpath_id_for_peer(peer, afi, safi,
+							     &bpi->tx_addpath))
+			continue;
+
+		if (CHECK_FLAG(bpi->flags,
+			       BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
+			break;
+	}
 	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
 		       BMP_MON_OUT_PREPOLICY) &&
 	    CHECK_FLAG(bqe->flags, BMP_MON_OUT_PREPOLICY)) {
 
-		/* lookup path in rib */
-		struct bgp_path_info *bpi;
-		for (bpi = bn ? bgp_dest_get_bgp_path_info(bn) : NULL; bpi;
-		     bpi = bpi->next) {
-			if (addpath_tx_id !=
-			    bgp_addpath_id_for_peer(peer, afi, safi,
-						    &bpi->tx_addpath))
-				continue;
-
-			if (CHECK_FLAG(bpi->flags,
-				       BGP_PATH_SELECTED | BGP_PATH_MULTIPATH))
-				break;
-		}
-
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O, bmp_get_peer_type(peer),
 			    &bqe->p, prd, bpi ? bpi->attr : NULL, afi, safi,
 			    addpath_tx_id, (time_t)(-1L), bpi,
-			    bmp_make_path_status_adjout(
+			    bmp_make_path_status_adjout_pre(
 				    bpi, !bn && bpi ? bpi->net : bn, peer,
 				    addpath_tx_id, afi, safi));
 
@@ -2629,11 +2677,9 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
 			    bmp_get_peer_type(peer), &bqe->p, prd,
 			    advertised_attr, afi, safi, addpath_tx_id,
-			    (time_t)(-1L), NULL,
-			bmp_make_path_status(adj && adj->adv && adj->adv->pathi
-						     ? adj->adv->pathi
-						     : NULL,
-					     bn, afi, safi));
+			    (time_t)(-1L), bpi,
+			bmp_make_path_status_adjout_post(
+				    adj, bpi, peer, afi, safi));
 
 		written = true;
 	}
