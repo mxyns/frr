@@ -41,6 +41,8 @@
 #include "bgpd/bgp_network.h"
 #include "bgp_addpath.h"
 #include "bgp_rd.h"
+#include "bgpd/bgp_open.h"
+#include "bgpd/bgp_aspath.h"
 
 static void bmp_close(struct bmp *bmp);
 static struct bmp_bgp *bmp_bgp_find(struct bgp *bgp);
@@ -503,6 +505,11 @@ static inline int bmp_get_peer_distinguisher(struct bgp *bgp, afi_t afi,
 	if (bgp->inst_type == VRF_DEFAULT)
 		return (int)(*result_ref = 0);
 
+	/* if requested afi has no rd configured find any other */
+	if (!CHECK_FLAG(bgp->vpn_policy[afi].flags,
+			BGP_VPN_POLICY_TOVPN_RD_SET))
+		afi = AFI_UNSPEC;
+
 	/* afi not known, use any afi configured in this vrf */
 	if (afi == AFI_UNSPEC) {
 		{ /* scope lock iter variables */
@@ -640,16 +647,14 @@ static void bmp_put_info_tlv(struct stream *s, uint16_t type,
 
 /* put the vrf table name of the bgp instance bmp is bound to in a tlv on the
  * stream */
-static void __attribute__((unused))
-bmp_put_vrftablename_info_tlv(struct stream *s, struct bmp *bmp)
+static void
+bmp_put_vrftablename_info_tlv(struct stream *s, struct bgp *bgp)
 {
 
 #define BMP_INFO_TYPE_VRFTABLENAME 3
 	const char *vrftablename = "global";
-	if (bmp->targets->bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
-		struct vrf *vrf = vrf_lookup_by_id(bmp->targets->bgp->vrf_id);
-
-		vrftablename = vrf ? vrf->name : NULL;
+	if (bgp->inst_type != BGP_INSTANCE_TYPE_DEFAULT) {
+		vrftablename = bgp->name;
 	}
 	if (vrftablename != NULL)
 		bmp_put_info_tlv(s, BMP_INFO_TYPE_VRFTABLENAME, vrftablename);
@@ -701,7 +706,8 @@ static void bmp_notify_put(struct stream *s, struct bgp_notify *nfy)
 
 /* send peer up/down for peer based on down boolean value
  * returns the message to send or NULL if the peer_distinguisher is not
- * available */
+ * available
+ */
 static struct stream *bmp_peerstate(struct peer *peer, bool down)
 {
 	struct stream *s;
@@ -713,6 +719,7 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 	monotime_to_realtime(&uptime, &uptime_real);
 
 	uint8_t peer_type = bmp_get_peer_type(peer);
+	bool is_locrib = peer_type == BMP_PEER_TYPE_LOC_RIB_INSTANCE;
 
 	BMP_PEER_DIST_TRY_GET_OR(peer->bgp, AFI_UNSPEC, peer_distinguisher,
 				 return NULL);
@@ -720,17 +727,18 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 #define BGP_BMP_MAX_PACKET_SIZE	1024
 	s = stream_new(BGP_MAX_PACKET_SIZE);
 
-	if (peer_established(peer) && !down) {
+	if (!down && (peer_established(peer) || is_locrib)) {
 		struct bmp_bgp_peer *bbpeer;
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_UP_NOTIFICATION);
-
 		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type,
 				 peer_distinguisher, &uptime_real);
 
 		/* Local Address (16 bytes) */
-		if (peer->su_local->sa.sa_family == AF_INET6)
+		if (!peer->su_local || is_locrib)
+			stream_put(s, 0, 16);
+		else if (peer->su_local->sa.sa_family == AF_INET6)
 			stream_put(s, &peer->su_local->sin6.sin6_addr, 16);
 		else if (peer->su_local->sa.sa_family == AF_INET) {
 			stream_putl(s, 0);
@@ -740,15 +748,21 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 		}
 
 		/* Local Port, Remote Port */
-		if (peer->su_local->sa.sa_family == AF_INET6)
+		if (is_locrib)
+			stream_putw(s, 0);
+		else if (peer->su_local->sa.sa_family == AF_INET6)
 			stream_putw(s, htons(peer->su_local->sin6.sin6_port));
 		else if (peer->su_local->sa.sa_family == AF_INET)
 			stream_putw(s, htons(peer->su_local->sin.sin_port));
-		if (peer->su_remote->sa.sa_family == AF_INET6)
+
+		if (is_locrib)
+			stream_putw(s, 0);
+		else if (peer->su_remote->sa.sa_family == AF_INET6)
 			stream_putw(s, htons(peer->su_remote->sin6.sin6_port));
 		else if (peer->su_remote->sa.sa_family == AF_INET)
 			stream_putw(s, htons(peer->su_remote->sin.sin_port));
 
+		/* TODO craft message with fields & capabilities for loc-rib */
 		static const uint8_t dummy_open[] = {
 			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
@@ -780,41 +794,50 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 
 		bmp_common_hdr(s, BMP_VERSION_3,
 				BMP_TYPE_PEER_DOWN_NOTIFICATION);
-
 		bmp_per_peer_hdr(s, peer->bgp, peer, 0, peer_type,
 				 peer_distinguisher, &uptime_real);
 
 		type_pos = stream_get_endp(s);
 		stream_putc(s, 0);	/* placeholder for down reason */
 
-		switch (peer->last_reset) {
-		case PEER_DOWN_NOTIFY_RECEIVED:
-			type = BMP_PEERDOWN_REMOTE_NOTIFY;
-			bmp_notify_put(s, &peer->notify);
-			break;
-		case PEER_DOWN_CLOSE_SESSION:
-			type = BMP_PEERDOWN_REMOTE_CLOSE;
-			break;
-		case PEER_DOWN_WAITING_NHT:
-			type = BMP_PEERDOWN_LOCAL_FSM;
-			stream_putw(s, BGP_FSM_TcpConnectionFails);
-			break;
-		/*
-		 * TODO: Map remaining PEER_DOWN_* reasons to RFC event codes.
-		 * TODO: Implement BMP_PEERDOWN_LOCAL_NOTIFY.
-		 *
-		 * See RFC7854 ss. 4.9
-		 */
-		default:
-			type = BMP_PEERDOWN_LOCAL_FSM;
-			stream_putw(s, BMP_PEER_DOWN_NO_RELEVANT_EVENT_CODE);
-			break;
+		if (is_locrib) {
+			type = BMP_PEERDOWN_LOCAL_TLV;
+		} else {
+			switch (peer->last_reset) {
+			case PEER_DOWN_NOTIFY_RECEIVED:
+				type = BMP_PEERDOWN_REMOTE_NOTIFY;
+				bmp_notify_put(s, &peer->notify);
+				break;
+			case PEER_DOWN_CLOSE_SESSION:
+				type = BMP_PEERDOWN_REMOTE_CLOSE;
+				break;
+			case PEER_DOWN_WAITING_NHT:
+				type = BMP_PEERDOWN_LOCAL_FSM;
+				stream_putw(s, BGP_FSM_TcpConnectionFails);
+				break;
+			/*
+			 * TODO: Map remaining PEER_DOWN_* reasons to RFC event
+			 * codes.
+			 * TODO: Implement BMP_PEERDOWN_LOCAL_NOTIFY.
+			 *
+			 * See RFC7854 ss. 4.9
+			 */
+			default:
+				type = BMP_PEERDOWN_LOCAL_FSM;
+				stream_putw(
+					s,
+					BMP_PEER_DOWN_NO_RELEVANT_EVENT_CODE);
+				break;
+			}
 		}
 		stream_putc_at(s, type_pos, type);
 	}
 
+	if (is_locrib)
+		bmp_put_vrftablename_info_tlv(s, peer->bgp);
+
 	len = stream_get_endp(s);
-	stream_putl_at(s, BMP_LENGTH_POS, len); /*message length is set. */
+	stream_putl_at(s, BMP_LENGTH_POS, len); /* message length is set. */
 	return s;
 }
 
@@ -838,6 +861,27 @@ static int bmp_send_peerup(struct bmp *bmp)
 	return 0;
 }
 
+static int bmp_send_peerup_vrf(struct bmp *bmp) {
+
+	struct bmp_bgp *bmpbgp = bmp->targets->bmpbgp;
+
+	/* send unconditionally because state may has been set before the
+	 * session was up. and in this case the peer up has not been sent. */
+	bmp_bgp_update_vrf_status(bmpbgp, vrf_state_unknown);
+
+	struct stream *s = bmp_peerstate(bmpbgp->bgp->peer_self, bmpbgp->vrf_up == vrf_state_down);
+
+	if (!s) {
+		zlog_warn("bmp: peer state error");
+		return 1;
+	}
+
+	pullwr_write_stream(bmp->pullwr, s);
+	stream_free(s);
+
+	return 0;
+}
+
 /* send a stream to all bmp sessions configured in a bgp instance */
 /* XXX: kludge - filling the pullwr's buffer */
 static void bmp_send_all(struct bmp_bgp *bmpbgp, struct stream *s)
@@ -852,6 +896,14 @@ static void bmp_send_all(struct bmp_bgp *bmpbgp, struct stream *s)
 		frr_each(bmp_session, &bt->sessions, bmp)
 			pullwr_write_stream(bmp->pullwr, s);
 	stream_free(s);
+}
+
+static void bmp_send_all_safe(struct bmp_bgp *bmpbgp, struct stream *s) {
+
+	if (!s || !bmpbgp)
+		return;
+
+	bmp_send_all(bmpbgp, s);
 }
 
 /*
@@ -1126,7 +1178,7 @@ static int bmp_peer_status_changed(struct peer *peer)
 		}
 	}
 
-	bmp_send_all(bmpbgp, bmp_peerstate(peer, false));
+	bmp_send_all_safe(bmpbgp, bmp_peerstate(peer, false));
 	return 0;
 }
 
@@ -1151,7 +1203,7 @@ static int bmp_peer_backward(struct peer *peer)
 		bbpeer->open_rx_len = 0;
 	}
 
-	bmp_send_all(bmpbgp, bmp_peerstate(peer, true));
+	bmp_send_all_safe(bmpbgp, bmp_peerstate(peer, true));
 	return 0;
 }
 
@@ -2179,6 +2231,7 @@ static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 		bmp->state = BMP_PeerUp;
 		// fall through
 	case BMP_PeerUp:
+		bmp_send_peerup_vrf(bmp);
 		bmp_send_peerup(bmp);
 		bmp->state = BMP_Run;
 		break;
@@ -2718,6 +2771,7 @@ static struct bmp_bgp *bmp_bgp_get(struct bgp *bgp)
 
 	bmpbgp = XCALLOC(MTYPE_BMP, sizeof(*bmpbgp));
 	bmpbgp->bgp = bgp;
+	bmpbgp->vrf_up = vrf_state_unknown;
 	bmpbgp->mirror_qsizelimit = ~0UL;
 	bmpbgp->startup_delay_ms = 0;
 	bmp_mirrorq_init(&bmpbgp->mirrorq);
@@ -2751,6 +2805,73 @@ static int bmp_bgp_del(struct bgp *bgp)
 	if (bmpbgp)
 		bmp_bgp_put(bmpbgp);
 	return 0;
+}
+
+static void bmp_bgp_peer_vrf(struct bmp_bgp_peer *bbpeer, struct bgp *bgp) {
+
+	struct peer *peer = bgp->peer_self;
+	uint16_t send_holdtime;
+	as_t local_as;
+
+	if (CHECK_FLAG(peer->flags, PEER_FLAG_TIMER))
+		send_holdtime = peer->holdtime;
+	else
+		send_holdtime = peer->bgp->default_holdtime;
+
+	/* local-as Change */
+	if (peer->change_local_as)
+		local_as = peer->change_local_as;
+	else
+		local_as = peer->local_as;
+
+	struct stream *s = bgp_open_make(peer, send_holdtime, local_as);
+	size_t open_len = stream_get_endp(s);
+
+	bbpeer->open_rx_len = open_len;
+	bbpeer->open_rx = XMALLOC(MTYPE_BMP_OPEN, open_len);
+	memcpy(bbpeer->open_rx, s->data, open_len);
+
+	bbpeer->open_tx_len = open_len;
+	bbpeer->open_tx = bbpeer->open_rx;
+}
+
+/* update the vrf status of the bmpbgp struct for vrf peer up/down
+ *
+ * if force is unknown, use zebra vrf state
+ *
+ * returns true if state has changed
+ */
+bool bmp_bgp_update_vrf_status(struct bmp_bgp *bmpbgp,
+			       enum bmp_vrf_state force) {
+
+	if (!bmpbgp || !bmpbgp->bgp)
+		return false;
+
+	struct bgp *bgp = bmpbgp->bgp;
+	enum bmp_vrf_state old_state = bmpbgp->vrf_up;
+
+	struct vrf *vrf = bgp_vrf_lookup_by_instance_type(bgp);
+	bmpbgp->vrf_up = force != vrf_state_unknown ? force :
+			 vrf_is_enabled(vrf) ? vrf_state_up : vrf_state_down;
+
+	bool changed = old_state != bmpbgp->vrf_up;
+	if (changed) {
+		struct peer *peer = bmpbgp->bgp->peer_self;
+		struct bmp_bgp_peer *bbpeer;
+		if (bmpbgp->vrf_up == vrf_state_up) {
+			bbpeer = bmp_bgp_peer_get(peer);
+			bmp_bgp_peer_vrf(bbpeer, bgp);
+		} else {
+			bbpeer = bmp_bgp_peer_find(peer->qobj_node.nid);
+			if (bbpeer) {
+				XFREE(MTYPE_BMP_OPEN, bbpeer->open_rx);
+				bmp_peerh_del(&bmp_peerh, bbpeer);
+				XFREE(MTYPE_BMP_PEER, bbpeer);
+			}
+		}
+	}
+
+	return changed;
 }
 
 static struct bmp_bgp_peer *bmp_bgp_peer_find(uint64_t peerid)
@@ -4057,6 +4178,42 @@ static int bmp_path_unlock(struct bgp *bgp, struct bgp_path_info *path)
 	return bmp_unlock_bpi(bgp, path) == NULL;
 }
 
+/* called when a bgp instance goes up/down, implying that the underlying VRF
+ * has been created or deleted in zebra
+ */
+static int bmp_vrf_state_changed(struct bgp *bgp) {
+
+	struct bmp_bgp *bmpbgp = bmp_bgp_find(bgp);
+
+	if (!bmp_bgp_update_vrf_status(bmpbgp, vrf_state_unknown))
+		return 1;
+
+	bmp_send_all_safe(bmpbgp, bmp_peerstate(bgp->peer_self, bmpbgp->vrf_up == vrf_state_down));
+
+	return 0;
+}
+
+/* called when an interface goes up/down in a vrf, this may signal that the
+ * VRF changed state and is how bgp_snmp detects vrf state changes
+ */
+static int bmp_vrf_itf_state_changed(struct bgp *bgp, struct interface *itf) {
+
+	/* if the update is not about the vrf device double-check
+	 * the zebra status of the vrf
+	 */
+	if (!itf || !if_is_vrf(itf))
+		return bmp_vrf_state_changed(bgp);
+
+	struct bmp_bgp *bmpbgp = bmp_bgp_find(bgp);
+	enum bmp_vrf_state new_state = if_is_up(itf) ? vrf_state_up : vrf_state_down;
+	if (bmp_bgp_update_vrf_status(bmpbgp, new_state)) {
+		bmp_send_all(bmpbgp,
+			     bmp_peerstate(bgp->peer_self, new_state == vrf_state_down));
+	}
+
+	return 0;
+}
+
 static int bgp_bmp_module_init(void)
 {
 	hook_register(bgp_packet_dump, bmp_mirror_packet);
@@ -4071,6 +4228,8 @@ static int bgp_bmp_module_init(void)
 	hook_register(bgp_route_update, bmp_route_update);
 	hook_register(bgp_adj_out_updated, bmp_adj_out_changed);
 	hook_register(bgp_process_main_one_end, bmp_path_unlock);
+	hook_register(bgp_instance_state, bmp_vrf_state_changed);
+	hook_register(bgp_vrf_status_changed, bmp_vrf_itf_state_changed);
 	return 0;
 }
 

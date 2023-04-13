@@ -331,10 +331,19 @@ PREDECL_HASH(bmp_bgph);
 
 #define BMP_PEER_DOWN_NO_RELEVANT_EVENT_CODE 0x00
 
+enum bmp_vrf_state {
+	vrf_state_down = -1,
+	vrf_state_unknown = 0,
+	vrf_state_up = 1,
+};
+
 struct bmp_bgp {
 	struct bmp_bgph_item bbi;
 
 	struct bgp *bgp;
+
+	enum bmp_vrf_state vrf_up;
+
 	struct bmp_targets_head targets;
 
 	struct bmp_mirrorq_head mirrorq;
@@ -345,12 +354,16 @@ struct bmp_bgp {
 	uint32_t startup_delay_ms;
 };
 
+extern bool bmp_bgp_update_vrf_status(struct bmp_bgp *bmpbgp,
+				     enum bmp_vrf_state force);
+
 enum {
 	BMP_PEERDOWN_LOCAL_NOTIFY       = 1,
 	BMP_PEERDOWN_LOCAL_FSM          = 2,
 	BMP_PEERDOWN_REMOTE_NOTIFY      = 3,
 	BMP_PEERDOWN_REMOTE_CLOSE       = 4,
 	BMP_PEERDOWN_ENDMONITOR         = 5,
+	BMP_PEERDOWN_LOCAL_TLV         	= 6,
 };
 
 enum {
