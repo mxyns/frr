@@ -80,6 +80,21 @@ static uint32_t bmp_time_since_startup(struct timeval *delay)
 	return micros / 1000;
 }
 
+static const char *bmp_state_str(enum BMP_State state)
+{
+	switch (state) {
+
+	case BMP_StartupIdle:
+		return "Startup-Wait";
+	case BMP_PeerUp:
+		return "Peer-Up";
+	case BMP_Run:
+		return "Running";
+	default:
+		return "Unknown";
+	}
+}
+
 static int bmp_bgp_cmp(const struct bmp_bgp *a, const struct bmp_bgp *b)
 {
 	if (a->bgp < b->bgp)
@@ -1842,8 +1857,8 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 	struct prefix_rd *prd = is_vpn ? &bqe->rd : NULL;
 
-	bn = bgp_afi_node_lookup(bmp->targets->bgp->rib[afi][safi], afi, safi,
-				 &bqe->p, prd);
+	bn = bgp_safi_node_lookup(bmp->targets->bgp->rib[afi][safi], safi,
+				  &bqe->p, prd);
 
 	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
 		       BMP_MON_OUT_PREPOLICY) &&
@@ -2101,7 +2116,7 @@ static void bmp_stats(struct event *thread)
 	struct timeval tv;
 	afi_t afi;
 	safi_t safi;
-	int afid;
+
 	uint64_t af_stat[AFI_MAX][SAFI_MAX];
 	struct update_subgroup *subgrp;
 
