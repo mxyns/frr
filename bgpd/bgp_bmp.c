@@ -462,13 +462,10 @@ static inline int bmp_get_peer_type_vrf(vrf_id_t vrf_id)
 }
 
 /* determine the peer type for per-peer headers from a struct peer
- * provide a bgp->peer_self for loc-rib */
+ * bgp->peer_self will NOT give loc-rib peer type
+ */
 static inline int bmp_get_peer_type(struct peer *peer)
 {
-
-	if (peer->bgp->peer_self == peer)
-		return BMP_PEER_TYPE_LOC_RIB_INSTANCE;
-
 	return bmp_get_peer_type_vrf(peer->bgp->vrf_id);
 }
 
@@ -563,7 +560,8 @@ static void bmp_common_hdr(struct stream *s, uint8_t ver, uint8_t type)
 }
 
 /* add per-peer header to the stream */
-static void bmp_per_peer_hdr(struct stream *s, struct bgp *bgp,
+static void bmp_per_peer_hdr
+	(struct stream *s, struct bgp *bgp,
 			     struct peer *peer, uint8_t flags,
 			     uint8_t peer_type_flag,
 			     uint64_t peer_distinguisher,
@@ -705,6 +703,7 @@ static void bmp_notify_put(struct stream *s, struct bgp_notify *nfy)
 }
 
 /* send peer up/down for peer based on down boolean value
+ * if vrf is true this a peerstate for a vrf state
  * returns the message to send or NULL if the peer_distinguisher is not
  * available
  */
@@ -718,8 +717,9 @@ static struct stream *bmp_peerstate(struct peer *peer, bool down)
 	uptime.tv_usec = 0;
 	monotime_to_realtime(&uptime, &uptime_real);
 
-	uint8_t peer_type = bmp_get_peer_type(peer);
-	bool is_locrib = peer_type == BMP_PEER_TYPE_LOC_RIB_INSTANCE;
+	bool is_locrib = peer->bgp->peer_self == peer;
+	uint8_t peer_type = is_locrib ? BMP_PEER_TYPE_LOC_RIB_INSTANCE
+				: bmp_get_peer_type(peer);
 
 	BMP_PEER_DIST_TRY_GET_OR(peer->bgp, AFI_UNSPEC, peer_distinguisher,
 				 return NULL);
@@ -1362,7 +1362,7 @@ static struct stream *bmp_withdraw(const struct prefix *p,
 		mp_start = stream_get_endp(s);
 		mplen_pos = bgp_packet_mpunreach_start(s, afi, safi);
 
-		bgp_packet_mpunreach_prefix(s, p, afi, safi, prd, NULL, 0, 1,
+		bgp_packet_mpunreach_prefix(s, p, afi, safi, prd, NULL, 0, safi != SAFI_MPLS_VPN,
 					    addpath_id, NULL);
 		/* Set the mp_unreach attr's length */
 		bgp_packet_mpunreach_end(s, mplen_pos);
@@ -1381,16 +1381,14 @@ static struct stream *bmp_withdraw(const struct prefix *p,
  * if uptime is (time_t)(-1L) then do not include the timestamp in the message
  */
 static void bmp_monitor(struct bmp *bmp, struct peer *peer, uint8_t flags,
-			const struct prefix *p, struct prefix_rd *prd,
-			struct attr *attr, afi_t afi, safi_t safi,
-			uint32_t addpath_id, time_t uptime,
+			uint8_t peer_type, const struct prefix *p,
+			struct prefix_rd *prd, struct attr *attr, afi_t afi,
+			safi_t safi, uint32_t addpath_id, time_t uptime,
 			struct bgp_path_info *bpi)
 {
 	struct stream *hdr, *msg;
 	struct timeval tv = { .tv_sec = uptime, .tv_usec = 0 };
 	struct timeval uptime_real;
-
-	uint8_t peer_type = bmp_get_peer_type(peer);
 
 	BMP_PEER_DIST_TRY_GET_RET(bmp->targets->bgp, afi, peer_distinguisher);
 
@@ -1468,9 +1466,10 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 						    &ctx->bpi->tx_addpath);
 
 			bmp_monitor(ctx->bmp, PAF_PEER(paf), BMP_PEER_FLAG_O,
-				    &ctx->dest->p, ctx->prd, ctx->attr,
-				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id, monotime(NULL), ctx->bpi);
+				    bmp_get_peer_type(PAF_PEER(paf)), &ctx->dest->p,
+				    ctx->prd, ctx->attr, SUBGRP_AFI(subgrp),
+				    SUBGRP_SAFI(subgrp), addpath_tx_id,
+				    monotime(NULL), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -1549,10 +1548,11 @@ static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp,
 
 		SUBGRP_FOREACH_PEER (subgrp, paf) {
 			bmp_monitor(ctx->bmp, PAF_PEER(paf),
-				    BMP_PEER_FLAG_O | BMP_PEER_FLAG_L, ctx->pfx,
-				    ctx->prd, advertised_attr,
-				    SUBGRP_AFI(subgrp), SUBGRP_SAFI(subgrp),
-				    addpath_tx_id, monotime(NULL), ctx->bpi);
+				    BMP_PEER_FLAG_O | BMP_PEER_FLAG_L,
+				    bmp_get_peer_type(PAF_PEER(paf)), ctx->pfx, ctx->prd,
+				    advertised_attr, SUBGRP_AFI(subgrp),
+				    SUBGRP_SAFI(subgrp), addpath_tx_id,
+				    monotime(NULL), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -1785,8 +1785,9 @@ afibreak:
 	bool written = false;
 
 	if (adjin) {
-		bmp_monitor(bmp, adjin->peer, 0, bn_p, prd, adjin->attr, afi,
-			    safi, adjin->addpath_rx_id, adjin->uptime, NULL);
+		bmp_monitor(bmp, adjin->peer, 0, bmp_get_peer_type(adjin->peer), bn_p,
+			    prd, adjin->attr, afi, safi, adjin->addpath_rx_id,
+			    adjin->uptime, NULL);
 		written = true;
 	}
 
@@ -1794,9 +1795,9 @@ afibreak:
 
 	if (bpi && CHECK_FLAG(bpi->flags, BGP_PATH_VALID) &&
 	    CHECK_FLAG(mon_flags, BMP_MON_IN_POSTPOLICY)) {
-		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L, bn_p, prd,
-			    bpi->attr, afi, safi, bpi->addpath_rx_id,
-			    bpi->uptime, bpi);
+		bmp_monitor(bmp, bpi->peer, BMP_PEER_FLAG_L,
+			    bmp_get_peer_type(bpi->peer), bn_p, prd, bpi->attr, afi,
+			    safi, bpi->addpath_rx_id, bpi->uptime, bpi);
 
 		UNSET_FLAG(bpi->flags, BGP_PATH_BMP_ADJIN_CHG);
 		written = true;
@@ -1807,8 +1808,8 @@ afibreak:
 		CHECK_FLAG(bpi->flags, BGP_PATH_SELECTED | BGP_PATH_MULTIPATH);
 
 	if (bpi_selected && CHECK_FLAG(mon_flags, BMP_MON_LOC_RIB)) {
-		bmp_monitor(bmp, bpi->peer, 0, bn_p, prd, bpi->attr, afi, safi,
-			    bpi->addpath_rx_id,
+		bmp_monitor(bmp, bpi->peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE, bn_p,
+			    prd, bpi->attr, afi, safi, bpi->addpath_rx_id,
 			    bpi && bpi->extra ? bpi->extra->bgp_rib_uptime
 					      : (time_t)(-1L),
 			    bpi);
@@ -1988,7 +1989,8 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		if (CHECK_FLAG(flags, BMP_MON_IN_POSTPOLICY) &&
 		    CHECK_FLAG(bpi->flags, BGP_PATH_VALID)) {
 
-			bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p, prd,
+			bmp_monitor(bmp, peer, BMP_PEER_FLAG_L,
+				    bmp_get_peer_type(peer), &bqe->p, prd,
 				    bpi->attr, afi, safi, addpath_rx_id,
 				    bpi->uptime, bpi);
 			ribin = bpi;
@@ -2000,8 +2002,9 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 		    CHECK_FLAG(bpi->flags,
 			       BGP_PATH_SELECTED | BGP_PATH_MULTIPATH)) {
 
-			bmp_monitor(bmp, peer, 0, &bqe->p, prd, bpi->attr, afi,
-				    safi, addpath_rx_id,
+			bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE,
+				    &bqe->p, prd, bpi->attr, afi, safi,
+				    addpath_rx_id,
 				    bpi->extra ? bpi->extra->bgp_rib_uptime
 					       : (time_t)(-1L),
 				    bpi);
@@ -2016,15 +2019,17 @@ static bool bmp_wrqueue_locrib(struct bmp *bmp, struct pullwr *pullwr)
 
 	/* rib-in post-policy path not found, send withdraw */
 	if (CHECK_FLAG(flags, BMP_MON_IN_POSTPOLICY) && !ribin) {
-		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, &bqe->p, prd, NULL, afi,
-			    safi, addpath_rx_id, (time_t)(-1), NULL);
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L, bmp_get_peer_type(peer),
+			    &bqe->p, prd, NULL, afi, safi, addpath_rx_id,
+			    (time_t)(-1), NULL);
 		written = true;
 	}
 
 	/* loc-rib path not found, send withdraw */
 	if (CHECK_FLAG(flags, BMP_MON_LOC_RIB) && !locrib) {
-		bmp_monitor(bmp, peer, 0, &bqe->p, prd, NULL, afi, safi,
-			    addpath_rx_id, (time_t)(-1L), NULL);
+		bmp_monitor(bmp, peer, 0, BMP_PEER_TYPE_LOC_RIB_INSTANCE, &bqe->p, prd,
+			    NULL, afi, safi, addpath_rx_id, (time_t)(-1L),
+			    NULL);
 		written = true;
 	}
 
@@ -2091,9 +2096,9 @@ static bool bmp_wrqueue_ribin(struct bmp *bmp, struct pullwr *pullwr)
 			break;
 	}
 
-	bmp_monitor(bmp, peer, 0, &bqe->p, prd, adjin ? adjin->attr : NULL, afi,
-		    safi, addpath_rx_id, adjin ? adjin->uptime : monotime(NULL),
-		    NULL);
+	bmp_monitor(bmp, peer, 0, bmp_get_peer_type(peer), &bqe->p, prd,
+		    adjin ? adjin->attr : NULL, afi, safi, addpath_rx_id,
+		    adjin ? adjin->uptime : monotime(NULL), NULL);
 
 	written = true;
 
@@ -2126,7 +2131,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 	safi_t safi = bqe->safi;
 	uint32_t addpath_tx_id = bqe->addpath_id;
 
-	if (CHECK_FLAG(bmp->targets->afimon[afi][safi],
+	if (!CHECK_FLAG(bmp->targets->afimon[afi][safi],
 		       BMP_MON_OUT_POSTPOLICY | BMP_MON_OUT_PREPOLICY)) {
 		goto out;
 	}
@@ -2167,9 +2172,9 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 				break;
 		}
 
-		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O, &bqe->p, prd,
-			    bpi ? bpi->attr : NULL, afi, safi, addpath_tx_id,
-			    monotime(NULL), bpi);
+		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O, bmp_get_peer_type(peer),
+			    &bqe->p, prd, bpi ? bpi->attr : NULL, afi, safi,
+			    addpath_tx_id, monotime(NULL), bpi);
 
 		written = true;
 	}
@@ -2191,8 +2196,9 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 				      : NULL;
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
-			    &bqe->p, prd, advertised_attr, afi, safi,
-			    addpath_tx_id, monotime(NULL), NULL);
+			    bmp_get_peer_type(peer), &bqe->p, prd,
+			    advertised_attr, afi, safi, addpath_tx_id,
+			    monotime(NULL), NULL);
 
 		written = true;
 	}
@@ -2271,11 +2277,11 @@ static void bmp_wrerr(struct bmp *bmp, struct pullwr *pullwr, bool eof)
  * need to update correct queue pos for all sessions of the target after
  * a call to this function
  */
-static struct bmp_queue_entry *bmp_process_one(
-	struct bmp_targets * bt, struct bmp_qhash_head * updhash,
-	struct bmp_qlist_head * updlist, struct bgp * bgp, afi_t afi,
-	safi_t safi, struct bgp_dest * bn, uint32_t addpath_id,
-	struct peer * peer, uint8_t mon_flag)
+static struct bmp_queue_entry *
+bmp_process_one(struct bmp_targets *bt, struct bmp_qhash_head *updhash,
+		struct bmp_qlist_head *updlist, afi_t afi, safi_t safi,
+		struct bgp_dest *bn, uint32_t addpath_id, struct peer *peer,
+		uint8_t mon_flag)
 {
 	struct bmp_queue_entry *bqe, bqeref;
 	size_t refcount;
@@ -2367,8 +2373,8 @@ static int bmp_process_ribinpre(struct bgp *bgp, afi_t afi, safi_t safi,
 			continue;
 
 		struct bmp_queue_entry *new_item = bmp_process_one(
-			bt, &bt->mon_in_updhash, &bt->mon_in_updlist, bgp, afi,
-			safi, bn, addpath_id, peer, BMP_MON_IN_PREPOLICY);
+			bt, &bt->mon_in_updhash, &bt->mon_in_updlist, afi, safi,
+			bn, addpath_id, peer, BMP_MON_IN_PREPOLICY);
 
 		/* if bmp_process_one returns NULL
 		 * we don't have anything to do next
@@ -2422,8 +2428,8 @@ static int bmp_process_ribinpost(struct bgp *bgp, afi_t afi, safi_t safi,
 			if (CHECK_FLAG(bpi->flags, BGP_PATH_BMP_ADJIN_CHG)) {
 				new_item = bmp_process_one(
 					bt, &bt->mon_loc_updhash,
-					&bt->mon_loc_updlist, bgp, afi, safi,
-					bn, bpi->addpath_rx_id, bpi->peer,
+					&bt->mon_loc_updlist, afi, safi, bn,
+					bpi->addpath_rx_id, bpi->peer,
 					BMP_MON_IN_POSTPOLICY);
 
 				new_head = !new_head ? new_item : new_head;
@@ -2533,7 +2539,7 @@ static void bmp_stats(struct event *thread)
 		s = stream_new(BGP_MAX_PACKET_SIZE);
 		bmp_common_hdr(s, BMP_VERSION_3, BMP_TYPE_STATISTICS_REPORT);
 		bmp_per_peer_hdr(s, bt->bgp, peer, 0,
-				 BMP_PEER_TYPE_GLOBAL_INSTANCE, 0, &tv);
+				 peer_type, peer_distinguisher, &tv);
 
 		count_pos = stream_get_endp(s);
 		stream_putl(s, 0);
@@ -4040,13 +4046,13 @@ static int bmp_route_update(struct bgp *bgp, afi_t afi, safi_t safi,
 		if (old_route && new_route && old_route != new_route) {
 			new_head = bmp_process_one(
 				bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist,
-				bgp, afi, safi, bn, old_route->addpath_rx_id,
+				afi, safi, bn, old_route->addpath_rx_id,
 				old_route->peer, BMP_MON_LOC_RIB);
 		}
 
 		struct bmp_queue_entry *new_item = bmp_process_one(
-			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, bgp,
-			afi, safi, bn, updated_route->addpath_rx_id,
+			bt, &bt->mon_loc_updhash, &bt->mon_loc_updlist, afi,
+			safi, bn, updated_route->addpath_rx_id,
 			updated_route->peer, BMP_MON_LOC_RIB);
 		new_head = !new_head ? new_item : new_head;
 
@@ -4102,8 +4108,8 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 
 				if (!lbpi) {
 					zlog_warn(
-						"no locked path found for %pRN tx %" PRIu32,
-						dest, addpath_id);
+						"no locked path found for %pRN tx %" PRIu32" in bgp %s",
+						dest, addpath_id, SUBGRP_INST(subgrp)->name);
 					return 0;
 				}
 
@@ -4150,8 +4156,7 @@ static int bmp_adj_out_changed(struct update_subgroup *subgrp,
 
 			struct bmp_queue_entry *new_item = bmp_process_one(
 				bt, &bt->mon_out_updhash, &bt->mon_out_updlist,
-				NULL, afi, safi, dest, addpath_id, peer,
-				mon_flag);
+				afi, safi, dest, addpath_id, peer, mon_flag);
 
 			/* if bmp_process_one returns NULL
 			 * we don't have anything to do next

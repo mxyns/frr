@@ -522,9 +522,6 @@ void bgp_mpath_diff_insert(struct bgp_mpath_diff_head *diff,
 	bgp_path_info_lock(bpi);
 	bgp_dest_lock_node(bpi->net);
 	bgp_mpath_diff_add_tail(diff, item);
-	zlog_info("%s: added %p to %s, cnt=%d", __func__, bpi,
-		  update ? "update" : "withdraw",
-		  (int)bgp_mpath_diff_count(diff));
 }
 
 void bgp_mpath_diff_clear(struct bgp_mpath_diff_head *diff)
