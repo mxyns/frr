@@ -3364,17 +3364,12 @@ static void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest,
 	}
 
 	/* TODO BMP insert rib update hook */
-	if (old_select) {
-		if (old_select->peer)
-			old_select->peer->stat_loc_rib_count[afi][safi]--;
+	if (old_select)
 		bgp_path_info_unset_flag(dest, old_select, BGP_PATH_SELECTED);
-	}
+
 	if (new_select) {
 		if (debug)
 			zlog_debug("%s: setting SELECTED flag", __func__);
-
-		if (new_select->peer)
-			new_select->peer->stat_loc_rib_count[afi][safi]++;
 
 		bgp_path_info_set_flag(dest, new_select, BGP_PATH_SELECTED);
 		bgp_path_info_unset_flag(dest, new_select,
@@ -3453,12 +3448,24 @@ out:
 	if (old_select || new_select)
 		hook_call(bgp_process_main_one_end, bgp,
 			  old_select && !new_select ? old_select : new_select);
+	if (old_select && old_select->peer)
+			old_select->peer->stat_loc_rib_count[afi][safi]--;
 
+	if (new_select && new_select->peer)
+		new_select->peer->stat_loc_rib_count[afi][safi]++;
+
+	struct bgp_path_info *mpath;
 	frr_each (bgp_mpath_diff, &mpath_diff, diff) {
-		if (!diff->path)
+		mpath = diff->path;
+
+		if (!mpath)
 			continue;
 
-		hook_call(bgp_process_main_one_end, bgp, diff->path);
+		if (mpath->peer)
+			mpath->peer->stat_loc_rib_count[afi][safi] += diff->update ? 1 : -1;
+
+		hook_call(bgp_process_main_one_end, bgp, mpath);
+
 	}
 	bgp_mpath_diff_clear(&mpath_diff);
 	bgp_mpath_diff_fini(&mpath_diff);
