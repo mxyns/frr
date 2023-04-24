@@ -1469,7 +1469,7 @@ static int bmp_monitor_rib_out_pre_updgrp_walkcb(struct update_group *updgrp,
 				    bmp_get_peer_type(PAF_PEER(paf)), &ctx->dest->p,
 				    ctx->prd, ctx->attr, SUBGRP_AFI(subgrp),
 				    SUBGRP_SAFI(subgrp), addpath_tx_id,
-				    monotime(NULL), ctx->bpi);
+				    (time_t)(-1L), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -1552,7 +1552,7 @@ static int bmp_monitor_rib_out_post_updgrp_walkcb(struct update_group *updgrp,
 				    bmp_get_peer_type(PAF_PEER(paf)), ctx->pfx, ctx->prd,
 				    advertised_attr, SUBGRP_AFI(subgrp),
 				    SUBGRP_SAFI(subgrp), addpath_tx_id,
-				    monotime(NULL), ctx->bpi);
+				    (time_t)(-1L), ctx->bpi);
 
 			*ctx->written_ref = true;
 		}
@@ -2174,7 +2174,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_O, bmp_get_peer_type(peer),
 			    &bqe->p, prd, bpi ? bpi->attr : NULL, afi, safi,
-			    addpath_tx_id, monotime(NULL), bpi);
+			    addpath_tx_id, (time_t)(-1L), bpi);
 
 		written = true;
 	}
@@ -2198,7 +2198,7 @@ static bool bmp_wrqueue_ribout(struct bmp *bmp, struct pullwr *pullwr)
 		bmp_monitor(bmp, peer, BMP_PEER_FLAG_L | BMP_PEER_FLAG_O,
 			    bmp_get_peer_type(peer), &bqe->p, prd,
 			    advertised_attr, afi, safi, addpath_tx_id,
-			    monotime(NULL), NULL);
+			    (time_t)(-1L), NULL);
 
 		written = true;
 	}
