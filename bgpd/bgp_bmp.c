@@ -680,7 +680,7 @@ static void bmp_put_info_tlv_str(struct stream *s, uint16_t type,
 }
 
 /* put the vrf table name of the bgp instance bmp is bound to in a tlv on the
- * stream */
+ * stream from draft-ietf-grow-bmp-tlv */
 static void
 bmp_put_info_tlv_vrftablename_with_index(struct stream *s, struct bgp *bgp,
 					 uint16_t index) {
@@ -700,7 +700,9 @@ bmp_put_info_tlv_vrftablename_with_index(struct stream *s, struct bgp *bgp,
 	}
 }
 
-static void __attribute__((unused))
+/* put a VRF/Table Name TLV in the stream (from RFC9069)
+ */
+static void
 bmp_put_info_tlv_vrftablename(struct stream *s, struct bgp *bgp)
 {
 
@@ -716,6 +718,7 @@ bmp_put_info_tlv_vrftablename(struct stream *s, struct bgp *bgp)
 				     vrftablename, BMP_INFO_LENGTH_TABLE_NAME_MAX);
 }
 
+/* path status status codes from draft-cppy-grow-bmp-path-marking-tlv */
 enum bmp_path_status_code {
 	bmp_path_status_reserved	= 0x00000000,
 	bmp_path_status_invalid		= 0x00000001,
@@ -731,6 +734,7 @@ enum bmp_path_status_code {
 	bmp_path_status_invalid_rov	= 0x00000400,
 };
 
+/* path status reason codes from draft-cppy-grow-bmp-path-marking-tlv */
 enum bmp_path_status_reason_code {
 
 	bmp_path_status_reason_unkown = 0x0000,
@@ -747,11 +751,20 @@ enum bmp_path_status_reason_code {
 	bmp_path_status_reason_not_preferred_for_AIGP	                = 0x0020
 };
 
+/* path status reason type
+ */
 enum bgp_reason_type {
+	/* bgp decision process selection reason from bgp_process_main_one */
 	bgp_path_selection_reason,
+	/* inbound policy filtering reason from bgp_update */
 	bgp_inbound_filtered_reason,
 };
 
+/* a path status reason
+ *
+ * union of a selection reason or an inbound inbound filtered reason
+ * with a type to know which one is
+ */
 struct bgp_reason {
 	enum bgp_reason_type type;
 	union {
@@ -760,6 +773,8 @@ struct bgp_reason {
 	};
 };
 
+/* get a path status reason from a destination (using (non-)selection reason)
+ */
 static inline struct bgp_reason
 bmp_make_bgp_reason_select(struct bgp_dest* dest) {
 	return (struct bgp_reason) {
@@ -768,6 +783,8 @@ bmp_make_bgp_reason_select(struct bgp_dest* dest) {
 	};
 }
 
+/* get a path status reason from adjin (using inbound filtered reason)
+ */
 static inline struct bgp_reason
 bmp_make_bgp_reason_inbound(struct bgp_adj_in* adjin) {
 	return (struct bgp_reason) {
@@ -776,12 +793,21 @@ bmp_make_bgp_reason_inbound(struct bgp_adj_in* adjin) {
 	};
 }
 
+/* a path's status for draft-cppy-grow-bmp-path-marking-tlv-X
+ */
 struct bmp_path_status {
-
+	/* the wire status code (flags), 0 for unknown */
 	enum bmp_path_status_code status_code;
+	/* the wire reason code (flags), 0 for unknown */
 	enum bmp_path_status_reason_code reason_code;
 };
 
+/* compute the path status flags from the path and dest and afi/safi
+ *
+ * uses bpi for the flags
+ * uses dest for the non-installed status flag
+ * uses bpi and afi/safi for the addpath status (set based on the source peer)
+ */
 static enum bmp_path_status_code bmp_path_status_get_status(struct bgp_path_info *bpi, struct bgp_node *dest, afi_t afi, safi_t safi) {
 
 	enum bmp_path_status_code status = bmp_path_status_reserved;
@@ -826,7 +852,9 @@ static enum bmp_path_status_code bmp_path_status_get_status(struct bgp_path_info
 	return status;
 }
 
-
+/* get a path status reason from a bgp_reason
+ * bgp_reason is a union of all possible filtering reasons (inbound or selection)
+ */
 static enum bmp_path_status_reason_code
 bmp_path_status_get_reason(struct bgp_reason reason)
 {
@@ -906,7 +934,10 @@ filter_in_reason:
 
 }
 
-
+/* make a path status structure for a path and it's dest
+ * uses the path and dest for the status code
+ * uses the dest for the (non-)selection reason
+ */
 static inline struct bmp_path_status
 bmp_make_path_status(struct bgp_path_info *bpi, struct bgp_dest *dest,
 		     afi_t afi, safi_t safi)
@@ -920,6 +951,8 @@ bmp_make_path_status(struct bgp_path_info *bpi, struct bgp_dest *dest,
 	};
 }
 
+/* make a path status structure from a status and reason code
+ */
 static inline struct bmp_path_status bmp_make_path_status_manual(
 	enum bmp_path_status_code status_code,
 	enum bmp_path_status_reason_code reason_code) {
@@ -930,6 +963,11 @@ static inline struct bmp_path_status bmp_make_path_status_manual(
 	};
 }
 
+/* make a path status structure for an adj-rib-in route
+ *
+ * uses adjin for determining if filtered or not
+ * uses adjin afi safi for if addpath is used
+ */
 static inline struct bmp_path_status
 bmp_make_path_status_adjin(struct bgp_adj_in *adjin, afi_t afi, safi_t safi)
 {
@@ -947,6 +985,12 @@ bmp_make_path_status_adjin(struct bgp_adj_in *adjin, afi_t afi, safi_t safi)
 		bmp_path_status_get_reason(bmp_make_bgp_reason_inbound(adjin)));
 }
 
+/* make a path status structure for an adj-rib-out route
+ *
+ * uses bpi and dest for the path status and reason
+ * uses dest, dest_peer and addpath_tx_id to determine if outbound filtered
+ * uses dest_peer afi, safi, to determine if addpath is used
+ */
 static inline struct bmp_path_status
 bmp_make_path_status_adjout(struct bgp_path_info *bpi, struct bgp_dest *dest,
 			    struct peer *dest_peer, uint32_t addpath_tx_id,
@@ -961,12 +1005,18 @@ bmp_make_path_status_adjout(struct bgp_path_info *bpi, struct bgp_dest *dest,
 				 bmp_path_status_filtered_out;
 
 	UNSET_FLAG(path_status.status_code, bmp_path_status_addpath);
-	if (bgp_addpath_encode_tx(dest_peer, afi, safi))
+	if (dest_peer && bgp_addpath_encode_tx(dest_peer, afi, safi))
 		SET_FLAG(path_status.status_code, bmp_path_status_addpath);
 
 	return path_status;
 }
 
+/* put draft-cppy-grow-bmp-path-marking-tlv-X path status TLV to the stream
+ * E bit is always 0
+ *
+ * the optional reason is included if the reason is known and the status
+ * requires a reason, ie: non selected or invalid status
+ */
 static void bmp_put_info_tlv_path_status(struct stream *s, struct bmp_path_status status)
 {
 	bool E_bit = false;
