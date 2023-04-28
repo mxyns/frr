@@ -4154,17 +4154,6 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	bgp = peer->bgp;
 	dest = bgp_afi_node_get(bgp->rib[afi][safi], afi, safi, p, prd);
-	zlog_info("%s node get for %pFX is %p %pRN prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, p, dest, dest, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
-	{
-		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
-		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
-		if (test) bgp_dest_unlock_node(test);
-	}
-	{
-		struct bgp_dest *test = bgp_afi_node_get(bgp->rib[afi][safi], afi, safi, p, prd);
-		zlog_info("%s: test get %p %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
-		if (test) bgp_dest_unlock_node(test);
-	}
 
 	/* TODO: Check to see if we can get rid of "is_valid_label" */
 	if (afi == AFI_L2VPN && safi == SAFI_EVPN)
@@ -5005,12 +4994,6 @@ filtered:
 
 	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
 
-	{
-		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
-		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
-		if (test) bgp_dest_unlock_node(test);
-	}
-
 	if (bgp_debug_update(peer, p, NULL, 1)) {
 		if (!peer->rcvd_attr_printed) {
 			zlog_debug("%pBP rcvd UPDATE w/ attr: %s", peer,
@@ -5045,17 +5028,9 @@ filtered:
 		}
 
 		bgp_rib_remove(dest, pi, peer, afi, safi);
-		zlog_info("rib remove");
 	}
 
 	bgp_dest_unlock_node(dest);
-	zlog_info("unlock node: %d", dest->lock);
-
-	{
-		struct bgp_dest *test = bgp_afi_node_lookup(bgp->rib[afi][safi], afi, safi, p, prd);
-		zlog_info("%s: test lookup %pRN with %p afi %d safi %d %pFX prd : %"PRIu8" %"PRIu16" %"PRIu64"", __func__, test, bgp->rib[afi][safi], afi, safi, p, prd ? prd->family : -1, prd ? prd->prefixlen : -1, prd ? *(uint64_t *)prd->val : -1);
-		if (test) bgp_dest_unlock_node(test);
-	}
 
 #ifdef ENABLE_BGP_VNC
 	/*
