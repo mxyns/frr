@@ -561,8 +561,7 @@ static void bmp_common_hdr(struct stream *s, uint8_t ver, uint8_t type)
 }
 
 /* add per-peer header to the stream */
-static void bmp_per_peer_hdr
-	(struct stream *s, struct bgp *bgp,
+static void bmp_per_peer_hdr(struct stream *s, struct bgp *bgp,
 			     struct peer *peer, uint8_t flags,
 			     uint8_t peer_type_flag,
 			     uint64_t peer_distinguisher,
@@ -682,7 +681,7 @@ static void bmp_put_info_tlv_str(struct stream *s, uint16_t type,
 
 /* put the vrf table name of the bgp instance bmp is bound to in a tlv on the
  * stream */
-static void __attribute__((unused))
+static void
 bmp_put_info_tlv_vrftablename_with_index(struct stream *s, struct bgp *bgp,
 					 uint16_t index) {
 
@@ -950,7 +949,8 @@ static void bmp_send_all(struct bmp_bgp *bmpbgp, struct stream *s)
 
 	frr_each(bmp_targets, &bmpbgp->targets, bt)
 		frr_each(bmp_session, &bt->sessions, bmp)
-			pullwr_write_stream(bmp->pullwr, s);
+			if (bmp->state != BMP_StartupIdle)
+				pullwr_write_stream(bmp->pullwr, s);
 	stream_free(s);
 }
 
@@ -1311,6 +1311,8 @@ static void bmp_eor(struct bmp *bmp, afi_t afi, safi_t safi, uint8_t flags,
 	bgp_packet_set_size_with_offset(s, tlv_hdr_pos_after);
 	/* set tlv length  */
 	stream_putw_at(s, tlv_hdr_pos_before + BMP_INFO_OFFSET_TLV_LENGTH, stream_get_endp(s) - tlv_hdr_pos_after);
+
+	bmp_put_info_tlv_vrftablename_with_index(s, bmp->targets->bgp, 0);
 
 	for (ALL_LIST_ELEMENTS_RO(bmp->targets->bgp->peer, node, peer)) {
 		if (!peer->afc_nego[afi][safi])
