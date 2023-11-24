@@ -1240,7 +1240,9 @@ class TopoBMPCollector(TopoHost):
 
     def start(self):
         self.run(
-            "{}/bmp_collector/bmpserver -a {} -p {}&".format(CWD, self.ip, self.port),
+            "{}/bmp_collector/bmpserver -a {} -p {} > /var/log/bmpserver.log &".format(
+                CWD, self.ip, self.port
+            ),
             stdout=None,
         )
 
