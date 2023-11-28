@@ -2244,7 +2244,7 @@ static void bmp_wrfill(struct bmp *bmp, struct pullwr *pullwr)
 		zlog_info("bmp: Startup timeout expired, time since startup is %" PRIu32
 			  "ms", timeout_ms);
 		bmp->state = BMP_PeerUp;
-		
+
 		/* start BMP_PeerUp mode now */
 		bmp_wrfill(bmp, pullwr);
 		break;
