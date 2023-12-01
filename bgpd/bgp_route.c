@@ -15943,6 +15943,72 @@ void bgp_config_write_distance(struct vty *vty, struct bgp *bgp, afi_t afi,
 	}
 }
 
+
+DEFUN (show_bgp_local_path_id,
+      show_bgp_local_path_id_cmd,
+      "show bgp local-path-id <ipv4|ipv6> <A.B.C.D/M|X:X::X:X/M>",
+      SHOW_STR
+	      BGP_STR
+      "local path identifier\n"
+      BGP_AF_STR
+	      BGP_AF_STR
+      "Network in the BGP routing table to display\n"
+      "Network in the BGP routing table to display\n")
+{
+
+	int idx = AFI_IP;
+	char *network = NULL;
+	afi_t afi;
+	safi_t safi = SAFI_UNICAST;
+
+	argv_find_and_parse_afi(argv, argc, &idx, &afi);
+
+	zlog_info("show lpid 1 %s", get_afi_safi_str(afi, safi, false));
+	zlog_tls_buffer_flush();
+
+	if (argv_find(argv, argc, "A.B.C.D/M", &idx) ||
+		 argv_find(argv, argc, "X:X::X:X/M", &idx)) {
+		network = argv[idx]->arg;
+	} else {
+		vty_out(vty, "Unable to figure out Network\n");
+		return CMD_WARNING;
+	}
+
+	zlog_info("show lpid 2");
+	zlog_tls_buffer_flush();
+
+	struct prefix p;
+	if (!str2prefix(network, &p)) {
+		return CMD_ERR_NO_MATCH;
+	}
+
+	zlog_info("show lpid 3");
+	zlog_tls_buffer_flush();
+
+	struct bgp *bgp = bgp_get_default();
+	struct bgp_dest *dest = bgp_safi_node_lookup(bgp->rib[afi][safi], safi, &p, NULL);
+
+	zlog_info("show lpid 3");
+	zlog_tls_buffer_flush();
+
+	if (!dest) {
+		return CMD_ERR_NO_MATCH;
+	}
+
+	for (struct bgp_adj_in *adj = dest->adj_in; adj; adj = adj->next) {
+		vty_out(vty, "Prefix %pFX from peer %pBP ", &p, adj->peer);
+		if (adj->lpid) {
+			vty_out(vty, "local-path-id {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8"}\n", adj->lpid->process_id, adj->lpid->vrf_id, adj->lpid->path_id);
+		} else {
+			vty_out(vty, "local-path-id { NULL }");
+		}
+	}
+
+	bgp_dest_unlock_node(dest);
+	return CMD_SUCCESS;
+}
+
+
 /* Allocate routing table structure and install commands. */
 void bgp_route_init(void)
 {
@@ -15953,6 +16019,7 @@ void bgp_route_init(void)
 	FOREACH_AFI_SAFI (afi, safi)
 		bgp_distance_table[afi][safi] = bgp_table_init(NULL, afi, safi);
 
+	install_element(VIEW_NODE, &show_bgp_local_path_id_cmd);
 	/* IPv4 BGP commands. */
 	install_element(BGP_NODE, &bgp_table_map_cmd);
 	install_element(BGP_NODE, &bgp_network_cmd);
@@ -16102,3 +16169,4 @@ void bgp_route_finish(void)
 		bgp_distance_table[afi][safi] = NULL;
 	}
 }
+

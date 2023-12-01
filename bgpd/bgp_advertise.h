@@ -7,6 +7,7 @@
 #define _QUAGGA_BGP_ADVERTISE_H
 
 #include "lib/typesafe.h"
+#include "bgp_lpid.h"
 
 PREDECL_DLIST(bgp_adv_fifo);
 
@@ -100,6 +101,9 @@ struct bgp_adj_in {
 
 	/* Addpath identifier */
 	uint32_t addpath_rx_id;
+
+	/* Local Path ID */
+	struct local_path_id *lpid;
 };
 
 /* BGP advertisement list.  */

@@ -182,6 +182,7 @@ void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 	adj->attr = bgp_attr_intern(attr);
 	adj->uptime = monotime(NULL);
 	adj->addpath_rx_id = addpath_id;
+	adj->lpid = allocate_local_path_id(peer->bgp, dest);
 	BGP_ADJ_IN_ADD(dest, adj);
 	bgp_dest_lock_node(dest);
 }
@@ -194,6 +195,9 @@ void bgp_adj_in_remove(struct bgp_dest **dest, afi_t afi, safi_t safi,
 	bai->peer->stat_adj_in_count[afi][safi]--;
 	*dest = bgp_dest_unlock_node(*dest);
 	peer_unlock(bai->peer); /* adj_in peer reference */
+	if (bai->lpid)
+		XFREE(MTYPE_BGP_ROUTE_EXTRA, bai->lpid);
+
 	XFREE(MTYPE_BGP_ADJ_IN, bai);
 }
 
