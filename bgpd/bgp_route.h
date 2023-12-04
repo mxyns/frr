@@ -278,6 +278,7 @@ struct bgp_path_info {
 	/* For nexthop linked list */
 	LIST_ENTRY(bgp_path_info) nh_thread;
 
+	struct local_path_id *lpid;
 	/* Back pointer to the prefix node */
 	struct bgp_dest *net;
 

@@ -304,6 +304,9 @@ void bgp_path_info_free_with_caller(const char *name,
 
 	peer_unlock(path->peer); /* bgp_path_info peer reference */
 
+	if (path->lpid)
+		local_path_id_unlock(path->lpid);
+
 	XFREE(MTYPE_BGP_ROUTE, path);
 }
 
@@ -4303,6 +4306,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (has_valid_label)
 		assert(label != NULL);
 
+	struct local_path_id *lpid = NULL;
 
 	/* When peer's soft reconfiguration enabled.  Record input packet in
 	   Adj-RIBs-In.  */
@@ -4319,7 +4323,8 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			memcpy(&attr->evpn_overlay, evpn,
 			       sizeof(struct bgp_route_evpn));
 		}
-		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id);
+		lpid = local_path_id_allocate_bgp(bgp, dest);
+		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id, lpid);
 	}
 
 	/* Update permitted loop count */
@@ -5032,6 +5037,12 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* Addpath ID */
 	new->addpath_rx_id = addpath_id;
+
+	/* Local Path-Id */
+	if (!lpid)
+		lpid = local_path_id_allocate_bgp(bgp, dest);
+
+	new->lpid = local_path_id_lock(lpid);
 
 	/* Increment prefix */
 	bgp_aggregate_increment(bgp, p, new, afi, safi);
@@ -15963,7 +15974,6 @@ DEFUN (show_bgp_local_path_id,
 
 	argv_find_and_parse_afi(argv, argc, &idx, &afi);
 
-	zlog_info("show lpid 1 %s", get_afi_safi_str(afi, safi, false));
 	zlog_tls_buffer_flush();
 
 	if (argv_find(argv, argc, "A.B.C.D/M", &idx) ||
@@ -15974,7 +15984,6 @@ DEFUN (show_bgp_local_path_id,
 		return CMD_WARNING;
 	}
 
-	zlog_info("show lpid 2");
 	zlog_tls_buffer_flush();
 
 	struct prefix p;
@@ -15982,13 +15991,11 @@ DEFUN (show_bgp_local_path_id,
 		return CMD_ERR_NO_MATCH;
 	}
 
-	zlog_info("show lpid 3");
 	zlog_tls_buffer_flush();
 
 	struct bgp *bgp = bgp_get_default();
 	struct bgp_dest *dest = bgp_safi_node_lookup(bgp->rib[afi][safi], safi, &p, NULL);
 
-	zlog_info("show lpid 3");
 	zlog_tls_buffer_flush();
 
 	if (!dest) {
@@ -15996,12 +16003,19 @@ DEFUN (show_bgp_local_path_id,
 	}
 
 	for (struct bgp_adj_in *adj = dest->adj_in; adj; adj = adj->next) {
-		vty_out(vty, "Prefix %pFX from peer %pBP ", &p, adj->peer);
-		if (adj->lpid) {
+		vty_out(vty, "[adj-in] Prefix %pFX from peer %pBP ", &p, adj->peer);
+		if (adj->lpid)
 			vty_out(vty, "local-path-id {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8"}\n", adj->lpid->process_id, adj->lpid->vrf_id, adj->lpid->path_id);
-		} else {
-			vty_out(vty, "local-path-id { NULL }");
-		}
+		else
+			vty_out(vty, "local-path-id { NULL }\n");
+	}
+
+	for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi = bpi->next) {
+		vty_out(vty, "[loc-rib] Prefix %pFX from peer %pBP ", &p, bpi->peer);
+		if (bpi->lpid)
+			vty_out(vty, "local-path-id {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8"}\n", bpi->lpid->process_id, bpi->lpid->vrf_id, bpi->lpid->path_id);
+		else
+			vty_out(vty, "local-path-id { NULL }\n");
 	}
 
 	bgp_dest_unlock_node(dest);
