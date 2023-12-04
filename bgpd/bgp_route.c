@@ -75,6 +75,7 @@
 #include "bgpd/bgp_flowspec.h"
 #include "bgpd/bgp_flowspec_util.h"
 #include "bgpd/bgp_pbr.h"
+#include "bgpd/bgp_rd.h"
 
 #include "bgpd/bgp_route_clippy.c"
 
@@ -4066,7 +4067,8 @@ static void bgp_rib_withdraw(struct bgp_dest *dest, struct bgp_path_info *pi,
 
 struct bgp_path_info *info_make(int type, int sub_type, unsigned short instance,
 				struct peer *peer, struct attr *attr,
-				struct bgp_dest *dest)
+				struct bgp_dest *dest,
+				struct local_path_id *lpid, bool generate_lpid)
 {
 	struct bgp_path_info *new;
 
@@ -4079,6 +4081,12 @@ struct bgp_path_info *info_make(int type, int sub_type, unsigned short instance,
 	new->attr = attr;
 	new->uptime = monotime(NULL);
 	new->net = dest;
+
+	if (generate_lpid && !lpid)
+		lpid = local_path_id_allocate_bgp(peer->bgp, dest);
+
+	new->lpid = local_path_id_lock(lpid);
+
 	return new;
 }
 
@@ -4323,8 +4331,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 			memcpy(&attr->evpn_overlay, evpn,
 			       sizeof(struct bgp_route_evpn));
 		}
-		lpid = local_path_id_allocate_bgp(bgp, dest);
-		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id, lpid);
+		bgp_adj_in_set(dest, afi, safi, peer, attr, addpath_id, &lpid);
 	}
 
 	/* Update permitted loop count */
@@ -4970,7 +4977,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	}
 
 	/* Make new BGP info. */
-	new = info_make(type, sub_type, 0, peer, attr_new, dest);
+	new = info_make(type, sub_type, 0, peer, attr_new, dest, lpid, true);
 
 	/* Update MPLS label */
 	if (has_valid_label) {
@@ -5037,12 +5044,6 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 
 	/* Addpath ID */
 	new->addpath_rx_id = addpath_id;
-
-	/* Local Path-Id */
-	if (!lpid)
-		lpid = local_path_id_allocate_bgp(bgp, dest);
-
-	new->lpid = local_path_id_lock(lpid);
 
 	/* Increment prefix */
 	bgp_aggregate_increment(bgp, p, new, afi, safi);
@@ -6615,7 +6616,7 @@ void bgp_static_update(struct bgp *bgp, const struct prefix *p,
 
 	/* Make new BGP info. */
 	new = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_STATIC, 0, bgp->peer_self,
-			attr_new, dest);
+			attr_new, dest, NULL, true);
 
 	if (safi == SAFI_MPLS_VPN || safi == SAFI_ENCAP || safi == SAFI_EVPN) {
 		SET_FLAG(new->flags, BGP_PATH_VALID);
@@ -7482,7 +7483,7 @@ static void bgp_aggregate_install(
 		}
 
 		new = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_AGGREGATE, 0,
-				bgp->peer_self, attr, dest);
+				bgp->peer_self, attr, dest, NULL, false);
 
 		SET_FLAG(new->flags, BGP_PATH_VALID);
 
@@ -8796,7 +8797,7 @@ void bgp_redistribute_add(struct bgp *bgp, struct prefix *p,
 		}
 
 		new = info_make(type, BGP_ROUTE_REDISTRIBUTE, instance,
-				bgp->peer_self, new_attr, bn);
+				bgp->peer_self, new_attr, bn, NULL, false);
 		SET_FLAG(new->flags, BGP_PATH_VALID);
 
 		bgp_aggregate_increment(bgp, p, new, afi, SAFI_UNICAST);
@@ -15954,71 +15955,105 @@ void bgp_config_write_distance(struct vty *vty, struct bgp *bgp, afi_t afi,
 	}
 }
 
+static void show_lpid(struct vty *vty, struct local_path_id *lpid) {
+	if (lpid)
+		vty_out(vty, "local-path-id %p = {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8", lock=%d}\n", lpid, lpid->process_id, lpid->vrf_id, lpid->path_id, lpid->lock);
+	else
+		vty_out(vty, "local-path-id { NULL }\n");
+}
 
-DEFUN (show_bgp_local_path_id,
+static void show_all_lpids(struct vty *vty, const struct prefix *prefix, struct bgp_dest *dest) {
+
+	for (struct bgp_adj_in *adj = dest->adj_in; adj; adj = adj->next) {
+		vty_out(vty, "[adj-in] Prefix %pBD from peer %pBP ", dest, adj->peer);
+		show_lpid(vty, adj->lpid);
+	}
+
+	for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi = bpi->next) {
+		vty_out(vty, "[loc-rib] Prefix %pBD from peer %pBP ", dest, bpi->peer);
+		show_lpid(vty, bpi->lpid);
+	}
+
+	struct bgp_adj_out *adj;
+	RB_FOREACH (adj, bgp_adj_out_rb, &dest->adj_out) {
+		vty_out(vty, "[adj-out] Prefix %pBD (can't track original peer) ", dest);
+		show_lpid(vty, adj->lpid);
+	}
+
+}
+
+DEFPY (show_bgp_local_path_id,
       show_bgp_local_path_id_cmd,
-      "show bgp local-path-id <ipv4|ipv6> <A.B.C.D/M|X:X::X:X/M>",
-      SHOW_STR
-	      BGP_STR
-      "local path identifier\n"
-      BGP_AF_STR
-	      BGP_AF_STR
+      "show bgp local-path-id [<vrf|view> VIEWVRFNAME$vrf] [<ipv4|ipv6>$afi] [<unicast|multipath|vpn>$safi] <A.B.C.D/M|X:X::X:X/M>$prefix",
+	SHOW_STR
+	BGP_STR
+	"local path identifier\n"
+	BGP_INSTANCE_HELP_STR
+	BGP_AF_STR
+	BGP_AF_STR
+	BGP_AF_MODIFIER_STR
+	BGP_AF_MODIFIER_STR
+	BGP_AF_MODIFIER_STR
       "Network in the BGP routing table to display\n"
       "Network in the BGP routing table to display\n")
 {
 
-	int idx = AFI_IP;
-	char *network = NULL;
-	afi_t afi;
-	safi_t safi = SAFI_UNICAST;
+	afi_t afiz = AFI_IP;
+	safi_t safiz = SAFI_UNICAST;
 
-	argv_find_and_parse_afi(argv, argc, &idx, &afi);
+	if (afi)
+		afiz = bgp_vty_afi_from_str(afi);
 
+	if (safi)
+		safiz = bgp_vty_safi_from_str(safi);
+
+	struct bgp *bgp = vrf ? bgp_lookup_by_name(vrf) : bgp_get_default();
+
+	if (!bgp)
+		return CMD_ERR_NO_MATCH;
+
+	zlog_info("afi=%d safi=%d => %s", afiz, safiz, get_afi_safi_str(afiz, safiz, false));
+	zlog_info("bgp %p %s, prefix=%pFX", bgp, bgp ? bgp->name_pretty : "None", prefix);
 	zlog_tls_buffer_flush();
 
-	if (argv_find(argv, argc, "A.B.C.D/M", &idx) ||
-		 argv_find(argv, argc, "X:X::X:X/M", &idx)) {
-		network = argv[idx]->arg;
+	struct bgp_table *rib = bgp->rib[afiz][safiz];
+	if (safiz == SAFI_MPLS_VPN) {
+		for (struct bgp_dest *dest = bgp_table_top(rib); dest;
+		     dest = bgp_route_next(dest)) {
+			struct bgp_table *table = bgp_dest_get_bgp_table_info(dest);
+			if (!table)
+				continue;
+
+			struct prefix_rd *prd = (struct prefix_rd *)bgp_dest_get_prefix(dest);
+
+			if (prd) {
+				vty_out(vty, "VPN RD: ");
+				vty_out(vty, BGP_RD_AS_FORMAT(bgp->asnotation), prd);
+				vty_out(vty, "\n");
+			}
+			else vty_out(vty, "prd null\n");
+
+			struct bgp_dest *ndest = bgp_safi_node_lookup(rib, safiz, prefix, prd);
+
+			if (!ndest)
+				continue;
+
+			show_all_lpids(vty, prefix, ndest);
+
+			bgp_dest_unlock_node(ndest);
+		}
 	} else {
-		vty_out(vty, "Unable to figure out Network\n");
-		return CMD_WARNING;
+		struct bgp_dest *dest = bgp_safi_node_lookup(rib, safiz, prefix, NULL);
+
+		if (!dest) {
+			return CMD_ERR_NO_MATCH;
+		}
+
+		show_all_lpids(vty, prefix, dest);
+
+		bgp_dest_unlock_node(dest);
 	}
 
-	zlog_tls_buffer_flush();
-
-	struct prefix p;
-	if (!str2prefix(network, &p)) {
-		return CMD_ERR_NO_MATCH;
-	}
-
-	zlog_tls_buffer_flush();
-
-	struct bgp *bgp = bgp_get_default();
-	struct bgp_dest *dest = bgp_safi_node_lookup(bgp->rib[afi][safi], safi, &p, NULL);
-
-	zlog_tls_buffer_flush();
-
-	if (!dest) {
-		return CMD_ERR_NO_MATCH;
-	}
-
-	for (struct bgp_adj_in *adj = dest->adj_in; adj; adj = adj->next) {
-		vty_out(vty, "[adj-in] Prefix %pFX from peer %pBP ", &p, adj->peer);
-		if (adj->lpid)
-			vty_out(vty, "local-path-id {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8"}\n", adj->lpid->process_id, adj->lpid->vrf_id, adj->lpid->path_id);
-		else
-			vty_out(vty, "local-path-id { NULL }\n");
-	}
-
-	for (struct bgp_path_info *bpi = bgp_dest_get_bgp_path_info(dest); bpi; bpi = bpi->next) {
-		vty_out(vty, "[loc-rib] Prefix %pFX from peer %pBP ", &p, bpi->peer);
-		if (bpi->lpid)
-			vty_out(vty, "local-path-id {pid=%d, vrf=%"PRIu32", path_id=%"PRIu8"}\n", bpi->lpid->process_id, bpi->lpid->vrf_id, bpi->lpid->path_id);
-		else
-			vty_out(vty, "local-path-id { NULL }\n");
-	}
-
-	bgp_dest_unlock_node(dest);
 	return CMD_SUCCESS;
 }
 

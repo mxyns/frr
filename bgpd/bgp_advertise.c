@@ -164,7 +164,7 @@ bool bgp_adj_out_lookup(struct peer *peer, struct bgp_dest *dest,
 
 void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 		    struct peer *peer, struct attr *attr, uint32_t addpath_id,
-		    struct local_path_id *lpid)
+		    struct local_path_id **lpid)
 {
 	struct bgp_adj_in *adj;
 
@@ -174,6 +174,10 @@ void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 				bgp_attr_unintern(&adj->attr);
 				adj->attr = bgp_attr_intern(attr);
 			}
+
+			if (lpid)
+				*lpid = adj->lpid;
+
 			return;
 		}
 	}
@@ -183,7 +187,12 @@ void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 	adj->attr = bgp_attr_intern(attr);
 	adj->uptime = monotime(NULL);
 	adj->addpath_rx_id = addpath_id;
-	adj->lpid = local_path_id_lock(lpid);
+	adj->lpid =
+		local_path_id_lock(local_path_id_allocate_bgp(peer->bgp, dest));
+
+	if (lpid)
+		*lpid = adj->lpid;
+
 	BGP_ADJ_IN_ADD(dest, adj);
 	bgp_dest_lock_node(dest);
 }

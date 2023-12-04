@@ -444,7 +444,8 @@ extern void update_group_announce_rrclients(struct bgp *bgp);
 extern void peer_af_announce_route(struct peer_af *paf, int combine);
 extern struct bgp_adj_out *bgp_adj_out_alloc(struct update_subgroup *subgrp,
 					     struct bgp_dest *dest,
-					     uint32_t addpath_tx_id);
+					     uint32_t addpath_tx_id,
+					     struct local_path_id *lpid);
 extern void bgp_adj_out_remove_subgroup(struct bgp_dest *dest,
 					struct bgp_adj_out *adj,
 					struct update_subgroup *subgrp);

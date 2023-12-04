@@ -1545,7 +1545,7 @@ static int update_evpn_type5_route_entry(struct bgp *bgp_evpn,
 
 		/* create the route info from attribute */
 		pi = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_STATIC, 0,
-			       bgp_evpn->peer_self, attr_new, dest);
+			       bgp_evpn->peer_self, attr_new, dest, NULL, false);
 		SET_FLAG(pi->flags, BGP_PATH_VALID);
 
 		/* Type-5 routes advertise the L3-VNI */
@@ -1890,7 +1890,7 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 
 		/* Create new route with its attribute. */
 		tmp_pi = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_STATIC, 0,
-				   bgp->peer_self, attr_new, dest);
+				   bgp->peer_self, attr_new, dest, NULL, false);
 		SET_FLAG(tmp_pi->flags, BGP_PATH_VALID);
 		bgp_path_info_extra_get(tmp_pi);
 
@@ -2846,7 +2846,7 @@ bgp_create_evpn_bgp_path_info(struct bgp_path_info *parent_pi,
 
 	/* Create new route with its attribute. */
 	pi = info_make(parent_pi->type, BGP_ROUTE_IMPORTED, 0, parent_pi->peer,
-		       attr_new, dest);
+		       attr_new, dest, NULL, false);
 	SET_FLAG(pi->flags, BGP_PATH_VALID);
 	bgp_path_info_extra_get(pi);
 	if (!pi->extra->vrfleak)

@@ -7,7 +7,8 @@
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_attr.h"
 
-DECLARE_MTYPE(LPID_BGP);
+DEFINE_MGROUP(LPID, "Local Path-ID");
+DEFINE_MTYPE(LPID, LPID_BGP, "BGP Local-Path ID");
 
 struct local_path_id *local_path_id_allocate_bgp(struct bgp *bgp, struct bgp_dest *dest) {
 
@@ -62,7 +63,8 @@ struct local_path_id *local_path_id_allocate_bgp(struct bgp *bgp, struct bgp_des
 	return lpid;
 };
 
-struct local_path_id *local_path_id_lock(struct local_path_id *lpid) {
+struct local_path_id *local_path_id_lock(struct local_path_id *lpid)
+{
 	if (lpid)
 		lpid->lock++;
 
@@ -73,8 +75,8 @@ void local_path_id_free(struct local_path_id *lpid) {
 	XFREE(MTYPE_LPID_BGP, lpid);
 }
 
-void local_path_id_unlock(struct local_path_id *lpid) {
-
+void local_path_id_unlock(struct local_path_id *lpid)
+{
 	assert(lpid && lpid->lock > 0);
 	lpid->lock--;
 

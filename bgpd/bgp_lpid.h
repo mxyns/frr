@@ -7,8 +7,9 @@
 
 #include "lib/typesafe.h"
 
-DEFINE_MGROUP(LPID, "Local Path-ID");
-DEFINE_MTYPE(LPID, LPID_BGP, "BGP Local-Path ID");
+DECLARE_MGROUP(LPID);
+DECLARE_MTYPE(LPID_BGP);
+
 
 struct local_path_id {
 	int lock;

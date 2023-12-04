@@ -196,7 +196,7 @@ static int bgp_evpn_es_route_install(struct bgp *bgp,
 
 		/* Create new route with its attribute. */
 		pi = info_make(parent_pi->type, BGP_ROUTE_IMPORTED, 0,
-			       parent_pi->peer, attr_new, dest);
+			       parent_pi->peer, attr_new, dest, NULL, false);
 		SET_FLAG(pi->flags, BGP_PATH_VALID);
 		bgp_path_info_extra_get(pi);
 		if (!pi->extra->vrfleak)
@@ -394,7 +394,7 @@ int bgp_evpn_mh_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 
 		/* Create new route with its attribute. */
 		tmp_pi = info_make(ZEBRA_ROUTE_BGP, BGP_ROUTE_STATIC, 0,
-				   bgp->peer_self, attr_new, dest);
+				   bgp->peer_self, attr_new, dest, NULL, false);
 		SET_FLAG(tmp_pi->flags, BGP_PATH_VALID);
 
 		if (evp->prefix.route_type == BGP_EVPN_AD_ROUTE) {

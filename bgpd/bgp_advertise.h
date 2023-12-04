@@ -70,6 +70,9 @@ struct bgp_adj_out {
 
 	uint32_t addpath_tx_id;
 
+	/* Local Path-ID */
+	struct local_path_id *lpid;
+
 	/* Advertised attribute.  */
 	struct attr *attr;
 
@@ -140,7 +143,7 @@ extern bool bgp_adj_out_lookup(struct peer *peer, struct bgp_dest *dest,
 			       uint32_t addpath_tx_id);
 extern void bgp_adj_in_set(struct bgp_dest *dest, afi_t afi, safi_t safi,
 			   struct peer *peer, struct attr *attr,
-			   uint32_t addpath_id, struct local_path_id *lpid);
+			   uint32_t addpath_id, struct local_path_id **lpid);
 extern bool bgp_adj_in_unset(struct bgp_dest **dest, afi_t afi, safi_t safi,
 			     struct peer *peer, uint32_t addpath_id);
 extern void bgp_adj_in_remove(struct bgp_dest **dest, afi_t afi, safi_t safi,

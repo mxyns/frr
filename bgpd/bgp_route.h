@@ -839,10 +839,10 @@ extern uint8_t bgp_distance_apply(const struct prefix *p,
 extern afi_t bgp_node_afi(struct vty *);
 extern safi_t bgp_node_safi(struct vty *);
 
-extern struct bgp_path_info *info_make(int type, int sub_type,
-				       unsigned short instance,
-				       struct peer *peer, struct attr *attr,
-				       struct bgp_dest *dest);
+extern struct bgp_path_info *
+info_make(int type, int sub_type, unsigned short instance, struct peer *peer,
+	  struct attr *attr, struct bgp_dest *dest, struct local_path_id *lpid,
+	  bool generate_lpid);
 
 extern void route_vty_out(struct vty *vty, const struct prefix *p,
 			  struct bgp_path_info *path, int display, safi_t safi,
