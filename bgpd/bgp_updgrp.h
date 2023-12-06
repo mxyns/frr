@@ -61,8 +61,8 @@
 DECLARE_HOOK(bgp_adj_out_updated,
 	     (struct update_subgroup *subgrp, struct bgp_dest *dest,
 	      struct bgp_path_info *path, uint32_t addpath_id,
-	      struct attr *attr, bool post_policy, bool withdraw),
-	     (subgrp, dest, path, addpath_id, attr, post_policy, withdraw));
+	      struct attr *attr, bool post_policy, bool withdraw, struct local_path_id *lpid),
+	     (subgrp, dest, path, addpath_id, attr, post_policy, withdraw, lpid));
 
 enum bpacket_attr_vec_type { BGP_ATTR_VEC_NH = 0, BGP_ATTR_VEC_MAX };
 
@@ -457,7 +457,8 @@ extern void bgp_adj_out_updated(struct update_subgroup *subgrp,
 				struct bgp_dest *dest,
 				struct bgp_path_info *path, uint32_t addpath_tx,
 				struct attr *attr, bool post_policy,
-				bool withdraw, const char *caller);
+				bool withdraw, const char *caller,
+				struct local_path_id *lpid);
 extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       struct update_subgroup *subgrp,
 				       char withdraw, uint32_t addpath_tx_id);

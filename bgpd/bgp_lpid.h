@@ -10,7 +10,11 @@
 DECLARE_MGROUP(LPID);
 DECLARE_MTYPE(LPID_BGP);
 
-
+/* TODO why not use this as universal bridge between ribs
+ *  we can add backpointers to bgp_adj_in, bgp_path_info and bgp_adj_out
+ *  and remove all lookups when trying to match adj-in paths
+ *  with loc-rib or adj-out paths
+ */
 struct local_path_id {
 	int lock;
 	pid_t process_id;

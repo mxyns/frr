@@ -120,8 +120,8 @@ static const struct message bgp_pmsi_tnltype_str[] = {
 
 DEFINE_HOOK(bgp_process,
 	    (struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	     uint32_t addpath_id, struct peer *peer, bool post),
-	    (bgp, afi, safi, bn, addpath_id, peer, post));
+	     uint32_t addpath_id, struct peer *peer, bool post, struct local_path_id *lpid),
+	    (bgp, afi, safi, bn, addpath_id, peer, post, lpid));
 
 DEFINE_HOOK(bgp_process_main_one,
 	    (struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *dest),
@@ -3021,7 +3021,8 @@ void subgroup_process_announce_selected(struct update_subgroup *subgrp,
 	advertise = bgp_check_advertise(bgp, dest, safi);
 
 	bgp_adj_out_updated(subgrp, dest, selected, addpath_tx_id, &attr, false,
-			    selected && advertise ? false : true, __func__);
+			    selected && advertise ? false : true, __func__,
+			    selected ? selected->lpid : NULL);
 
 	if (selected) {
 		if (subgroup_announce_check(dest, selected, subgrp, p, &attr,
@@ -4012,7 +4013,7 @@ void bgp_rib_remove(struct bgp_dest *dest, struct bgp_path_info *pi,
 	}
 
 	hook_call(bgp_process, peer->bgp, afi, safi, dest,
-		  pi ? pi->addpath_rx_id : 0, peer, true);
+		  pi ? pi->addpath_rx_id : 0, peer, true, pi ? pi->lpid : NULL);
 	bgp_process(peer->bgp, dest, afi, safi);
 }
 
@@ -4604,7 +4605,7 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 		same_attr = attrhash_cmp(pi->attr, attr_new);
 
 		hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer,
-			  true);
+			  true, pi->lpid);
 
 		/* Same attribute comes in. */
 		if (!CHECK_FLAG(pi->flags, BGP_PATH_REMOVED)
@@ -5074,7 +5075,8 @@ void bgp_update(struct peer *peer, const struct prefix *p, uint32_t addpath_id,
 	if (safi == SAFI_EVPN && CHECK_FLAG(new->flags, BGP_PATH_VALID))
 		bgp_evpn_import_route(bgp, afi, safi, p, new);
 
-	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true);
+	// TODO no adj-in + filtered has no id. alloc id right after adj-in check
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, true, lpid);
 
 	/* Process change. */
 	bgp_process(bgp, dest, afi, safi);
@@ -5113,7 +5115,7 @@ filtered:
 		XFREE(MTYPE_BGP_ROUTE, new);
 	}
 
-	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false);
+	hook_call(bgp_process, bgp, afi, safi, dest, addpath_id, peer, false, lpid);
 
 	if (bgp_debug_update(peer, p, NULL, 1)) {
 		if (!peer->rcvd_attr_printed) {
@@ -5202,7 +5204,8 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 	 */
 	if (CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_SOFT_RECONFIG)
 	    && peer != bgp->peer_self) {
-		if (!bgp_adj_in_unset(&dest, afi, safi, peer, addpath_id)) {
+		struct local_path_id *lpid;
+		if (!bgp_adj_in_unset(&dest, afi, safi, peer, addpath_id, &lpid)) {
 			assert(dest);
 			peer->stat_pfx_dup_withdraw++;
 
@@ -5220,7 +5223,14 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 		}
 
 		hook_call(bgp_process, peer->bgp, afi, safi, dest, addpath_id,
-			  peer, false);
+			  peer, false, lpid);
+
+		/* bgp_adj_in_unset will lock the lpid.
+		 * we need to unlock it but only after bgp_process so
+		 * it can lock it too if it needs it
+		 */
+		if (lpid)
+			local_path_id_unlock(lpid);
 	}
 
 	/* Lookup withdrawn route. */

@@ -106,14 +106,15 @@ static void bgp_conditional_adv_routes(struct peer *peer, afi_t afi,
 					subgrp, dest, pi,
 					!addpath_capable
 						? 0
-						: bgp_addpath_id_for_peer(
-							  peer, afi, safi,
-							  &pi->tx_addpath),
+						: bgp_addpath_id_for_peer(peer,
+									  afi,
+									  safi,
+									  &pi->tx_addpath),
 					&attr, false,
 					update_type == UPDATE_TYPE_ADVERTISE
 						? false
 						: true,
-					__func__);
+					__func__, pi->lpid);
 			}
 
 

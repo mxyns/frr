@@ -678,8 +678,8 @@ static inline bool bgp_check_withdrawal(struct bgp *bgp, struct bgp_dest *dest,
 /* called before bgp_process() */
 DECLARE_HOOK(bgp_process,
 	     (struct bgp *bgp, afi_t afi, safi_t safi, struct bgp_dest *bn,
-	      uint32_t addpath_id, struct peer *peer, bool post),
-	     (bgp, afi, safi, bn, addpath_id, peer, post));
+	      uint32_t addpath_id, struct peer *peer, bool post, struct local_path_id *lpid),
+	     (bgp, afi, safi, bn, addpath_id, peer, post, lpid));
 
 /* called before bgp_process() */
 DECLARE_HOOK(bgp_process_main_one,

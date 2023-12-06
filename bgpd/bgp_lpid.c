@@ -12,12 +12,12 @@ DEFINE_MTYPE(LPID, LPID_BGP, "BGP Local-Path ID");
 
 struct local_path_id *local_path_id_allocate_bgp(struct bgp *bgp, struct bgp_dest *dest) {
 
-	uint8_t path_id = 1;
+	uint8_t path_id = 0;
 
 	struct bgp_adj_in *lookup_adjin = dest->adj_in;
 	struct bgp_path_info *lookup_rib = bgp_dest_get_bgp_path_info(dest);
 	while (lookup_adjin || lookup_rib) {
-		if (path_id == 255) {
+		if (path_id == sizeof(path_id) * 8 - 1) {
 			zlog_info("path id range exhausted for %pBD", dest);
 			return NULL;
 		}

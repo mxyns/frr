@@ -212,7 +212,8 @@ void bgp_adj_in_remove(struct bgp_dest **dest, afi_t afi, safi_t safi,
 }
 
 bool bgp_adj_in_unset(struct bgp_dest **dest, afi_t afi, safi_t safi,
-		      struct peer *peer, uint32_t addpath_id)
+		      struct peer *peer, uint32_t addpath_id,
+		      struct local_path_id **lpid)
 {
 	struct bgp_adj_in *adj;
 	struct bgp_adj_in *adj_next;
@@ -225,8 +226,11 @@ bool bgp_adj_in_unset(struct bgp_dest **dest, afi_t afi, safi_t safi,
 	while (adj) {
 		adj_next = adj->next;
 
-		if (adj->peer == peer && adj->addpath_rx_id == addpath_id)
+		if (adj->peer == peer && adj->addpath_rx_id == addpath_id) {
+			if (lpid)
+				*lpid = local_path_id_lock(adj->lpid);
 			bgp_adj_in_remove(dest, afi, safi, adj);
+		}
 
 		adj = adj_next;
 

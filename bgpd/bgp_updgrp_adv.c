@@ -40,8 +40,8 @@
 DEFINE_HOOK(bgp_adj_out_updated,
 	    (struct update_subgroup *subgrp, struct bgp_dest *dest,
 	     struct bgp_path_info *path, uint32_t addpath_id, struct attr *attr,
-	     bool post_policy, bool withdraw),
-	    (subgrp, dest, path, addpath_id, attr, post_policy, withdraw));
+	     bool post_policy, bool withdraw, struct local_path_id *lpid),
+	    (subgrp, dest, path, addpath_id, attr, post_policy, withdraw, lpid));
 
 /********************
  * PRIVATE FUNCTIONS
@@ -262,10 +262,13 @@ static int group_announce_route_walkcb(struct update_group *updgrp, void *arg)
 					}
 
 					if (!adj)
-						bgp_adj_out_updated(
-							subgrp, ctx->dest, NULL,
-							0, NULL, false, true,
-							__func__);
+						bgp_adj_out_updated(subgrp,
+								    ctx->dest,
+								    NULL, 0,
+								    NULL, false,
+								    true,
+								    __func__,
+								    NULL);
 				}
 			}
 		}
@@ -520,7 +523,7 @@ bgp_advertise_clean_subgroup(struct update_subgroup *subgrp,
 void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 			 struct bgp_path_info *path, uint32_t addpath_tx,
 			 struct attr *attr, bool post_policy, bool withdraw,
-			 const char *caller)
+			 const char *caller, struct local_path_id *lpid)
 {
 	if (path && !withdraw && CHECK_FLAG(path->flags, BGP_PATH_REMOVED)) {
 		/* path is removed, enforcing withdraw state */
@@ -528,7 +531,7 @@ void bgp_adj_out_updated(struct update_subgroup *subgrp, struct bgp_dest *dest,
 	}
 
 	hook_call(bgp_adj_out_updated, subgrp, dest, path, addpath_tx, attr,
-		  post_policy, withdraw);
+		  post_policy, withdraw, lpid);
 }
 
 void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
@@ -656,7 +659,7 @@ void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 	subgrp->version = MAX(subgrp->version, dest->version);
 
 	bgp_adj_out_updated(subgrp, dest, path, adj->addpath_tx_id, attr, true,
-			    false, __func__);
+			    false, __func__, adj->lpid);
 }
 
 /* The only time 'withdraw' will be false is if we are sending
@@ -709,7 +712,7 @@ void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 
 			bgp_adj_out_updated(subgrp, dest, NULL,
 					    adj->addpath_tx_id, NULL, true,
-					    withdraw, __func__);
+					    withdraw, __func__, adj->lpid);
 		} else {
 			/* Free allocated information.  */
 			adj_free(adj);

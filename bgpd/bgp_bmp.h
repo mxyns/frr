@@ -64,6 +64,7 @@ struct bmp_queue_entry {
 	struct bmp_qhash_item bhi;
 
 	uint32_t addpath_id;
+	struct local_path_id *lpid;
 
 #define BMP_QUEUE_FLAGS_NONE (0)
 	uint8_t flags;
