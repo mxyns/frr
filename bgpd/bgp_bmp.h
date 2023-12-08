@@ -68,7 +68,6 @@ struct bmp_queue_entry {
 
 #define BMP_QUEUE_FLAGS_NONE (0)
 	uint8_t flags;
-	struct prefix p;
 	uint64_t peerid;
 	afi_t afi;
 	safi_t safi;
@@ -76,7 +75,7 @@ struct bmp_queue_entry {
 	size_t refcount;
 
 	/* initialized only for L2VPN/EVPN (S)AFIs */
-	struct prefix_rd rd;
+	struct bgp_dest *dest;
 };
 
 /* This is for BMP Route Mirroring, which feeds fully raw BGP PDUs out to BMP

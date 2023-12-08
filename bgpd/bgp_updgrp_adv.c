@@ -88,9 +88,11 @@ static void adj_free(struct bgp_adj_out *adj)
 	SUBGRP_DECR_STAT(adj->subgroup, adj_count);
 
 	RB_REMOVE(bgp_adj_out_rb, &adj->dest->adj_out, adj);
-	bgp_dest_unlock_node(adj->dest);
+
 	if (adj->lpid)
-		local_path_id_unlock(adj->lpid);
+		local_path_id_unlock(adj->dest, adj->lpid);
+
+	bgp_dest_unlock_node(adj->dest);
 
 	XFREE(MTYPE_BGP_ADJ_OUT, adj);
 }

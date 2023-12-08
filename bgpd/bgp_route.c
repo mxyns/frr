@@ -296,6 +296,9 @@ void bgp_path_info_free_with_caller(const char *name,
 	frrtrace(2, frr_bgp, bgp_path_info_free, path, name);
 	bgp_attr_unintern(&path->attr);
 
+	if (path->lpid)
+		local_path_id_unlock(path->net, path->lpid);
+
 	bgp_unlink_nexthop(path);
 	bgp_path_info_extra_free(&path->extra);
 	bgp_path_info_mpath_free(&path->mpath);
@@ -304,9 +307,6 @@ void bgp_path_info_free_with_caller(const char *name,
 					   &path->net->tx_addpath);
 
 	peer_unlock(path->peer); /* bgp_path_info peer reference */
-
-	if (path->lpid)
-		local_path_id_unlock(path->lpid);
 
 	XFREE(MTYPE_BGP_ROUTE, path);
 }
@@ -5230,7 +5230,7 @@ void bgp_withdraw(struct peer *peer, const struct prefix *p,
 		 * it can lock it too if it needs it
 		 */
 		if (lpid)
-			local_path_id_unlock(lpid);
+			local_path_id_unlock(dest, lpid);
 	}
 
 	/* Lookup withdrawn route. */

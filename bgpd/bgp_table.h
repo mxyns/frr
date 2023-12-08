@@ -95,6 +95,8 @@ struct bgp_dest {
 	struct bgp_addpath_node_data tx_addpath;
 
 	enum bgp_path_selection_reason reason;
+
+	struct local_path_id_allocator lpid_allocator;
 };
 
 extern void bgp_delete_listnode(struct bgp_dest *dest);

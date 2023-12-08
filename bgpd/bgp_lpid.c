@@ -6,61 +6,50 @@
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_attr.h"
+#include "bgpd/bgp_lpid.h"
 
 DEFINE_MGROUP(LPID, "Local Path-ID");
 DEFINE_MTYPE(LPID, LPID_BGP, "BGP Local-Path ID");
 
 struct local_path_id *local_path_id_allocate_bgp(struct bgp *bgp, struct bgp_dest *dest) {
 
-	uint8_t path_id = 0;
+	assert(bgp && dest);
 
-	struct bgp_adj_in *lookup_adjin = dest->adj_in;
-	struct bgp_path_info *lookup_rib = bgp_dest_get_bgp_path_info(dest);
-	while (lookup_adjin || lookup_rib) {
-		if (path_id == sizeof(path_id) * 8 - 1) {
-			zlog_info("path id range exhausted for %pBD", dest);
-			return NULL;
-		}
+	struct local_path_id_allocator *alloc = &dest->lpid_allocator;
 
-		zlog_info("allocate path id for prefix %pBD: lookup_adjin=%p lookup_rib=%p current=%"PRIu8, dest, lookup_adjin, lookup_rib, path_id);
-		if (lookup_adjin && lookup_adjin->lpid)
-			zlog_info("found adjin id %"PRIu8, lookup_adjin->lpid->path_id);
+	if (alloc->allocated == LPID_MAX - 1) {
+		printf("local-path-id range exhausted for dest %pBD\n", dest);
+		return 0;
+	}
 
-		if (lookup_rib && lookup_rib->lpid)
-			zlog_info("found rib id %"PRIu8, lookup_rib->lpid->path_id);
+	for (size_t segment_id = 0; segment_id < LPID_NSEG; segment_id++) {
+		path_id_alloc_segment free_bitmask = ~alloc->segments[segment_id];
+		int offset = LPID_FFS(free_bitmask);
 
-		/* TODO O(N²), do better with sorted adj_in struct */
+		/* no bit found in free_bitmask => no spot available in segment
+		 * check the next one
+		 */
+		if (offset == 0)
+			continue;
+		else {
+			/* mark id as in use */
+			alloc->segments[segment_id] |= 1 << (offset - 1);
+			alloc->allocated += 1;
 
-		/* if we find the same id in either rib, change lookup id and start over */
-		if ((lookup_adjin && lookup_adjin->lpid && lookup_adjin->lpid->path_id == path_id)
-		    || (lookup_rib && lookup_rib->lpid && lookup_rib->lpid->path_id == path_id)) {
-			path_id++;
-			lookup_adjin = dest->adj_in;
-			lookup_rib = bgp_dest_get_bgp_path_info(dest);
-			zlog_info("new %"PRIu8", back at lookup_adjin=%p lookup_rib=%p", path_id,
-				  lookup_adjin, lookup_rib);
-		} else {
-			if (lookup_adjin) {
-				lookup_adjin = lookup_adjin->next;
-				zlog_info("next adjin %p", lookup_adjin);
+			path_id id = offset - 1 + LPID_SEGSIZE * segment_id;
+
+			printf("selected path id %"PRIu8"\n", id);
+			struct local_path_id *lpid = XCALLOC(MTYPE_LPID_BGP, sizeof(struct local_path_id));
+			if (lpid) {
+				lpid->path_id = id;
+				lpid->vrf_id = bgp->vrf_id;
+				lpid->process_id = getpid();
 			}
-
-			if (lookup_rib) {
-				lookup_rib = lookup_rib->next;
-				zlog_info("next rib %p", lookup_rib);
-			}
+			return lpid;
 		}
 	}
 
-	zlog_info("selected path id %"PRIu8, path_id);
-	struct local_path_id *lpid = XCALLOC(MTYPE_LPID_BGP, sizeof(struct local_path_id));
-	if (lpid) {
-		lpid->path_id = path_id;
-		lpid->vrf_id = bgp->vrf_id;
-		lpid->process_id = getpid();
-	}
-
-	return lpid;
+	return NULL;
 };
 
 struct local_path_id *local_path_id_lock(struct local_path_id *lpid)
@@ -71,15 +60,27 @@ struct local_path_id *local_path_id_lock(struct local_path_id *lpid)
 	return lpid;
 }
 
-void local_path_id_free(struct local_path_id *lpid) {
+void local_path_id_free(struct bgp_dest* dest, struct local_path_id *lpid) {
+
+	path_id id = lpid->path_id;
+	size_t segment_id = id / LPID_SEGSIZE;
+
+	struct local_path_id_allocator *alloc = &dest->lpid_allocator;
+
+	/* mark the id as unused */
+	path_id_alloc_segment bitmask = ~(1 << (id - (segment_id * LPID_SEGSIZE)));
+	assert(alloc->segments[segment_id] & ~bitmask);
+	alloc->segments[segment_id] &= bitmask;
+	alloc->allocated -= 1;
+
 	XFREE(MTYPE_LPID_BGP, lpid);
 }
 
-void local_path_id_unlock(struct local_path_id *lpid)
+void local_path_id_unlock(struct bgp_dest *dest, struct local_path_id *lpid)
 {
-	assert(lpid && lpid->lock > 0);
+	assert(dest && lpid && lpid->lock > 0);
 	lpid->lock--;
 
 	if (lpid->lock == 0)
-		local_path_id_free(lpid);
+		local_path_id_free(dest, lpid);
 }

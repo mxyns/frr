@@ -203,10 +203,12 @@ void bgp_adj_in_remove(struct bgp_dest **dest, afi_t afi, safi_t safi,
 	bgp_attr_unintern(&bai->attr);
 	BGP_ADJ_IN_DEL(*dest, bai);
 	bai->peer->stat_adj_in_count[afi][safi]--;
+
+	if (bai->lpid)
+		local_path_id_unlock(*dest, bai->lpid);
+
 	*dest = bgp_dest_unlock_node(*dest);
 	peer_unlock(bai->peer); /* adj_in peer reference */
-	if (bai->lpid)
-		local_path_id_unlock(bai->lpid);
 
 	XFREE(MTYPE_BGP_ADJ_IN, bai);
 }
